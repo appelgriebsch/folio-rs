@@ -26,6 +26,7 @@ struct Composed {
     xhtml: String,
     images: Vec<images::EmbeddedImage>,
     outline: Vec<Section>,
+    cover: Option<images::EmbeddedImage>,
 }
 
 /// This ticket fetches one page. `max_pages` is validated by the CLI and kept for later tickets.
@@ -53,6 +54,7 @@ pub fn publish(opts: Options) -> Result<std::path::PathBuf, Error> {
         &composed.xhtml,
         &composed.images,
         &composed.outline,
+        composed.cover.as_ref(),
     )?;
     temp.persist(&output)?;
     Ok(output)
@@ -64,23 +66,23 @@ fn choose_source(
     typed: &url::Url,
     verbose: bool,
 ) -> Result<Composed, Error> {
-    let scan = {
+    let (scan, site_banner) = {
         let doc = Document::from(page.html.as_str());
-        let base = meta::document_base(&doc, &page.response_url);
-        reader::scan(&doc, &base)
+        let meta = read_meta_doc(&doc, &page.response_url, typed);
+        (reader::scan(&doc, &meta.base), meta.banner)
     };
     if verbose {
         eprintln!("{}", scan.verbose_line());
     }
     match scan {
         ReaderScan::One(hit) => match fetch::fetch_html(http, &hit.url, verbose) {
-            Ok(reader_page) => match compose(http, &reader_page, typed) {
+            Ok(reader_page) => match compose(http, &reader_page, typed, site_banner) {
                 Ok(composed) => Ok(composed),
                 Err(err) => fallback(http, page, typed, &hit.url, err),
             },
             Err(err) => fallback(http, page, typed, &hit.url, err),
         },
-        ReaderScan::None | ReaderScan::Several => compose(http, page, typed),
+        ReaderScan::None | ReaderScan::Several => compose(http, page, typed, None),
     }
 }
 
@@ -96,7 +98,7 @@ fn fallback(
             eprintln!(
                 "warning: reader view failed ({reader_url}, {status}); used the article page"
             );
-            compose(http, page, typed)
+            compose(http, page, typed, None)
         }
         None => Err(err),
     }
@@ -106,6 +108,7 @@ fn compose(
     http: &reqwest::blocking::Client,
     page: &Page,
     typed: &url::Url,
+    site_banner: Option<String>,
 ) -> Result<Composed, Error> {
     let doc = Document::from(page.html.as_str());
     let meta = read_meta_doc(&doc, &page.response_url, typed);
@@ -135,6 +138,16 @@ fn compose(
         });
     }
     let mut warnings = ImageWarnings::default();
+    let banner = site_banner.or(meta.banner.clone());
+    let cover = banner
+        .as_deref()
+        .and_then(|url| match images::download_cover(http, url) {
+            Some(image) => Some(image),
+            None => {
+                warnings.push(url);
+                None
+            }
+        });
     let (with_images, embedded) = images::download_images(&cleaned, http, &mut warnings);
     warnings.emit();
     let (anchored, outline) = toc::anchor_outline(&with_images);
@@ -145,6 +158,7 @@ fn compose(
         xhtml,
         images: embedded,
         outline,
+        cover,
     })
 }
 
@@ -155,6 +169,7 @@ fn write_epub(
     xhtml_doc: &str,
     images: &[images::EmbeddedImage],
     outline: &[Section],
+    cover: Option<&images::EmbeddedImage>,
 ) -> Result<(), Error> {
     let mut editor = Epub::builder()
         .identifier(meta.identifier.as_str())
@@ -176,6 +191,14 @@ fn write_epub(
                 .href(image.href.as_str())
                 .media_type(image.media_type.as_str())
                 .content(image.bytes.clone()),
+        );
+    }
+    if let Some(cover) = cover {
+        editor = editor.cover_image(
+            DetachedEpubManifestEntry::new("cover")
+                .href(cover.href.as_str())
+                .media_type(cover.media_type.as_str())
+                .content(cover.bytes.clone()),
         );
     }
     let chapter = EpubChapter::new(title)

@@ -239,6 +239,7 @@ fn article_html(host: &str, title: &str, rev: &str, with_date: bool) -> String {
           {date}
           <link rel="canonical" href="http://{host}/canonical-article">
           <meta property="og:description" content="og description">
+          <meta property="og:image" content="http://{host}/photo.png">
         </head>
         <body>
           <article>
@@ -460,6 +461,8 @@ fn writes_epub_with_metadata_image_and_without_active_content() {
             .any(|bytes| bytes == &server.png)
     );
     assert!(server.image_hits.load(Ordering::SeqCst) >= 1);
+    let cover = epub.manifest().cover_image().expect("banner is the cover");
+    assert_eq!(cover.read_bytes().unwrap(), server.png);
     let toc = epub.toc().contents().unwrap();
     let chapter = toc.get(0).unwrap();
     assert_eq!(chapter.label(), "Article Headline");

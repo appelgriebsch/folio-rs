@@ -10,6 +10,8 @@ pub struct PageMeta {
     pub language: String,
     pub identifier: String,
     pub published: Option<String>,
+    /// Absolute http(s) URL of the page's share banner, when the page names one.
+    pub banner: Option<String>,
     pub base: Url,
 }
 
@@ -92,6 +94,19 @@ pub fn read_meta_doc(doc: &Document, response_url: &Url, typed_url: &Url) -> Pag
             &["dc.issued", "dcterms.issued", "dc:issued", "dcterms:issued"],
         ),
     ]);
+    let base = document_base(doc, response_url);
+    let banner = first_nonempty([
+        meta_content(&metas, &["og:image"]).and_then(|raw| absolute_http(&base, &raw)),
+        meta_content(&metas, &["twitter:image", "twitter:image:src"])
+            .and_then(|raw| absolute_http(&base, &raw)),
+        ld.iter()
+            .find(|n| n.article)
+            .and_then(|n| n.image.clone())
+            .and_then(|raw| absolute_http(&base, &raw)),
+        ld.iter()
+            .find_map(|n| n.image.clone())
+            .and_then(|raw| absolute_http(&base, &raw)),
+    ]);
     PageMeta {
         title,
         authors,
@@ -99,7 +114,17 @@ pub fn read_meta_doc(doc: &Document, response_url: &Url, typed_url: &Url) -> Pag
         language,
         identifier: canonical_identifier(doc).unwrap_or_else(|| typed_url.as_str().to_string()),
         published,
-        base: document_base(doc, response_url),
+        banner,
+        base,
+    }
+}
+
+fn absolute_http(base: &Url, raw: &str) -> Option<String> {
+    let joined = base.join(raw.trim()).ok()?;
+    if joined.scheme() == "http" || joined.scheme() == "https" {
+        Some(joined.to_string())
+    } else {
+        None
     }
 }
 
@@ -146,6 +171,7 @@ struct LdNode {
     authors: Vec<String>,
     description: Option<String>,
     language: Option<String>,
+    image: Option<String>,
 }
 
 fn json_ld_nodes(doc: &Document) -> Vec<LdNode> {
@@ -182,6 +208,7 @@ fn collect_ld(value: &Value, out: &mut Vec<LdNode>) {
                 authors: Vec::new(),
                 description: map.get("description").and_then(json_text),
                 language: map.get("inLanguage").and_then(json_text),
+                image: json_image(map.get("image")),
             };
             if let Some(author) = map.get("author") {
                 push_authors(author, &mut node.authors);
@@ -193,6 +220,7 @@ fn collect_ld(value: &Value, out: &mut Vec<LdNode>) {
                 || node.published.is_some()
                 || node.description.is_some()
                 || node.language.is_some()
+                || node.image.is_some()
                 || !node.authors.is_empty()
                 || node.article
             {
@@ -246,6 +274,18 @@ fn is_article_type(raw: &str) -> bool {
             | "ReviewNewsArticle"
     ) || name.ends_with("Article")
         || name.ends_with("Posting")
+}
+
+fn json_image(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) => nonempty(text),
+        Value::Array(items) => items.iter().find_map(|item| json_image(Some(item))),
+        Value::Object(map) => map
+            .get("url")
+            .and_then(json_text)
+            .or_else(|| map.get("contentUrl").and_then(json_text)),
+        _ => None,
+    }
 }
 
 fn push_authors(value: &Value, out: &mut Vec<String>) {
@@ -432,6 +472,52 @@ mod tests {
         assert_eq!(meta.description.as_deref(), Some("From json"));
         assert_eq!(meta.language, "de-DE");
         assert_eq!(meta.identifier, "https://example.com/canonical-article");
+        assert_eq!(meta.banner, None);
+    }
+
+    #[test]
+    fn banner_prefers_og_image_then_twitter_then_json_ld() {
+        let (response, typed) = urls();
+        let html = r#"
+            <html><head>
+            <base href="http://cdn.example/articles/">
+            <meta property="og:image" content="banner.jpg">
+            <meta name="twitter:image" content="https://other.example/card.jpg">
+            <script type="application/ld+json">
+              {"@type":"NewsArticle","image":{"url":"https://cdn.example/hero.jpg"}}
+            </script>
+            </head></html>
+        "#;
+        let meta = read_meta(html, &response, &typed);
+        assert_eq!(
+            meta.banner.as_deref(),
+            Some("http://cdn.example/articles/banner.jpg")
+        );
+
+        let twitter = r#"
+            <html><head>
+            <meta name="twitter:image" content="https://other.example/card.jpg">
+            <script type="application/ld+json">
+              {"@type":"NewsArticle","image":"https://cdn.example/hero.jpg"}
+            </script>
+            </head></html>
+        "#;
+        let meta = read_meta(twitter, &response, &typed);
+        assert_eq!(
+            meta.banner.as_deref(),
+            Some("https://other.example/card.jpg")
+        );
+
+        let json = r#"
+            <html><head>
+            <meta property="og:image" content="javascript:alert(1)">
+            <script type="application/ld+json">
+              {"@type":"NewsArticle","image":["https://cdn.example/hero.jpg"]}
+            </script>
+            </head></html>
+        "#;
+        let meta = read_meta(json, &response, &typed);
+        assert_eq!(meta.banner.as_deref(), Some("https://cdn.example/hero.jpg"));
     }
 
     #[test]
