@@ -41,9 +41,28 @@ fn map_readability(err: ReadabilityError, page_url: &str) -> Error {
         ReadabilityError::GrabFailed | ReadabilityError::BadDocumentURL => Error::NoArticle {
             url: page_url.to_string(),
         },
-        ReadabilityError::TooManyElements(_, _) => Error::Fetch {
-            url: page_url.to_string(),
-            reason: err.to_string(),
-        },
+        ReadabilityError::TooManyElements(_, _) => Error::ArticleTooLarge(page_url.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn too_many_elements_is_not_a_fetch_failure() {
+        let html = "<html><body><article><p>One sentence of article text.</p><p>More.</p></article></body></html>";
+        let mut config = Config::default();
+        config.char_threshold = 20;
+        config.max_elements_to_parse = 1;
+        let base = url::Url::parse("http://example.test/a").unwrap();
+        let mut readability = Readability::new(html, Some(base.as_str()), Some(config)).unwrap();
+        let err = readability.parse().unwrap_err();
+        let mapped = map_readability(err, base.as_str());
+        assert!(matches!(mapped, Error::ArticleTooLarge(_)));
+        assert_eq!(
+            mapped.to_string(),
+            "article is too large to read at http://example.test/a"
+        );
     }
 }

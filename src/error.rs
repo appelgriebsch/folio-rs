@@ -20,11 +20,20 @@ pub enum Error {
     #[error("output directory does not exist: {0}")]
     NoParent(String),
 
+    #[error("output parent is not a directory: {0}")]
+    ParentNotDir(String),
+
+    #[error("cannot use output path {path}: {reason}")]
+    UnusablePath { path: String, reason: String },
+
     #[error("cannot name the output file from the title; pass -o")]
     BadSlug,
 
     #[error("failed to fetch {url}: {reason}")]
     Fetch { url: String, reason: String },
+
+    #[error("article is too large to read at {0}")]
+    ArticleTooLarge(String),
 
     #[error("response exceeds the byte cap for {0}")]
     TooLarge(String),

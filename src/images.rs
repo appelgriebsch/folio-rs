@@ -214,8 +214,13 @@ fn flatten_picture(picture: &NodeRef<'_>, base: &Url) {
 }
 
 fn apply_candidates(img: &NodeRef<'_>, urls: &[Url]) {
+    let placeholder_box = dims_are_one(img);
     img.remove_attr("srcset");
     img.remove_attr("data-src");
+    if placeholder_box {
+        img.remove_attr("width");
+        img.remove_attr("height");
+    }
     if urls.is_empty() {
         img.remove_attr("src");
         img.remove_attr("data-folio-src");
@@ -576,8 +581,7 @@ fn accept_image(bytes: &[u8], content_type: Option<&str>) -> Option<Accepted> {
         Ok(ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::Gif) => {}
         _ => return None,
     }
-    let decoded = image::load_from_memory(bytes);
-    match decoded {
+    match decode_limited(bytes) {
         Ok(image) => {
             if image.width() == 1 || image.height() == 1 {
                 return None;
@@ -599,9 +603,32 @@ fn accept_image(bytes: &[u8], content_type: Option<&str>) -> Option<Accepted> {
 }
 
 fn raster_is_one_pixel(bytes: &[u8]) -> bool {
-    image::load_from_memory(bytes)
+    decode_limited(bytes)
         .map(|image| image.width() == 1 || image.height() == 1)
         .unwrap_or(false)
+}
+
+const MAX_IMAGE_EDGE: u32 = 8000;
+const MAX_IMAGE_ALLOC: u64 = 32 * 1024 * 1024;
+
+fn decode_limited(bytes: &[u8]) -> image::ImageResult<image::DynamicImage> {
+    decode_with_limits(bytes, MAX_IMAGE_EDGE, MAX_IMAGE_ALLOC)
+}
+
+fn decode_with_limits(
+    bytes: &[u8],
+    max_edge: u32,
+    max_alloc: u64,
+) -> image::ImageResult<image::DynamicImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(image::ImageError::IoError)?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(max_edge);
+    limits.max_image_height = Some(max_edge);
+    limits.max_alloc = Some(max_alloc);
+    reader.limits(limits);
+    reader.decode()
 }
 
 fn looks_like_svg(bytes: &[u8]) -> bool {
@@ -618,40 +645,160 @@ fn svg_is_safe(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
     };
-    if !text.to_ascii_lowercase().contains("<svg") {
-        return false;
-    }
     let lower = text.to_ascii_lowercase();
-    if lower.contains("<script") || lower.contains("foreignobject") || lower.contains("javascript:")
-    {
+    if !lower.contains("<svg") || lower.contains("javascript:") {
         return false;
     }
-    !has_event_handler(&lower)
+    svg_markup_is_safe(&lower)
 }
 
-fn has_event_handler(lower: &str) -> bool {
+fn svg_markup_is_safe(lower: &str) -> bool {
     let bytes = lower.as_bytes();
     let mut i = 0;
-    while i + 4 < bytes.len() {
-        let boundary = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
-        if boundary && bytes[i] == b'o' && bytes[i + 1] == b'n' {
-            let mut j = i + 2;
-            while j < bytes.len() && bytes[j].is_ascii_alphabetic() {
-                j += 1;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        if lower[i..].starts_with("<!--") {
+            let Some(end) = lower[i + 4..].find("-->") else {
+                return false;
+            };
+            i += 4 + end + 3;
+            continue;
+        }
+        if lower[i..].starts_with("<![cdata[") {
+            let Some(end) = lower[i + 9..].find("]]>") else {
+                return false;
+            };
+            i += 9 + end + 3;
+            continue;
+        }
+        if lower[i..].starts_with("<?") {
+            let Some(end) = lower[i + 2..].find("?>") else {
+                return false;
+            };
+            i += 2 + end + 2;
+            continue;
+        }
+        if lower[i..].starts_with("<!") {
+            return false;
+        }
+        let closing = lower[i..].starts_with("</");
+        let name_at = if closing { i + 2 } else { i + 1 };
+        let Some(name_end) = xml_name_end(bytes, name_at) else {
+            return false;
+        };
+        if name_end == name_at || forbidden_svg_name(local_name(&lower[name_at..name_end])) {
+            return false;
+        }
+        if closing {
+            let Some(rel) = lower[name_end..].find('>') else {
+                return false;
+            };
+            i = name_end + rel + 1;
+            continue;
+        }
+        match scan_svg_attributes(lower, name_end) {
+            Some(next) => i = next,
+            None => return false,
+        }
+    }
+    true
+}
+
+fn forbidden_svg_name(name: &str) -> bool {
+    matches!(
+        name,
+        "script" | "foreignobject" | "iframe" | "embed" | "object"
+    )
+}
+
+fn local_name(name: &str) -> &str {
+    name.rsplit_once(':')
+        .map(|(_, local)| local)
+        .unwrap_or(name)
+}
+
+fn xml_name_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':') {
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    Some(index)
+}
+
+fn scan_svg_attributes(lower: &str, mut index: usize) -> Option<usize> {
+    let bytes = lower.as_bytes();
+    loop {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            return None;
+        }
+        if bytes[index] == b'>' {
+            return Some(index + 1);
+        }
+        if bytes[index] == b'/' {
+            index += 1;
+            continue;
+        }
+        let attr_start = index;
+        let attr_end = xml_name_end(bytes, attr_start)?;
+        if attr_end == attr_start {
+            return None;
+        }
+        let attr = local_name(&lower[attr_start..attr_end]);
+        if attr.starts_with("on") && attr.len() > 2 {
+            return None;
+        }
+        index = attr_end;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index < bytes.len() && bytes[index] == b'=' {
+            index += 1;
+            while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                index += 1;
             }
-            if j >= i + 4 {
-                let mut k = j;
-                while k < bytes.len() && bytes[k].is_ascii_whitespace() {
-                    k += 1;
+            if index >= bytes.len() {
+                return None;
+            }
+            if bytes[index] == b'"' || bytes[index] == b'\'' {
+                let quote = bytes[index];
+                index += 1;
+                let start = index;
+                while index < bytes.len() && bytes[index] != quote {
+                    index += 1;
                 }
-                if k < bytes.len() && bytes[k] == b'=' {
-                    return true;
+                if index >= bytes.len() {
+                    return None;
+                }
+                if lower[start..index].contains("javascript:") {
+                    return None;
+                }
+                index += 1;
+            } else {
+                let start = index;
+                while index < bytes.len()
+                    && !bytes[index].is_ascii_whitespace()
+                    && bytes[index] != b'>'
+                    && bytes[index] != b'/'
+                {
+                    index += 1;
+                }
+                if lower[start..index].contains("javascript:") {
+                    return None;
                 }
             }
         }
-        i += 1;
     }
-    false
 }
 
 fn decode_data_url(url: &str) -> Option<(Option<String>, Vec<u8>)> {
@@ -813,6 +960,8 @@ mod tests {
         let html = r#"<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" data-src="/real.png" width="1" height="1">"#;
         let flat = flatten_images(html, &base());
         assert!(flat.contains("http://cdn.example/real.png"), "{flat}");
+        assert!(!flat.contains("width="), "{flat}");
+        assert!(!flat.contains("height="), "{flat}");
 
         let picture = r#"
             <picture>
@@ -873,6 +1022,21 @@ mod tests {
         assert!(accept_image(bad, Some("image/svg+xml")).is_none());
         let foreign = br#"<svg><foreignObject></foreignObject></svg>"#;
         assert!(accept_image(foreign, Some("image/svg+xml")).is_none());
+        let prefixed =
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><x:script>alert(1)</x:script></svg>"#;
+        assert!(accept_image(prefixed, Some("image/svg+xml")).is_none());
+        let handler =
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><rect onclick="alert(1)"/></svg>"#;
+        assert!(accept_image(handler, Some("image/svg+xml")).is_none());
+        let doctype = br#"<svg><!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]></svg>"#;
+        assert!(accept_image(doctype, Some("image/svg+xml")).is_none());
+    }
+
+    #[test]
+    fn decode_limit_rejects_an_oversized_edge() {
+        let png = tiny_png(2, 2);
+        let err = super::decode_with_limits(&png, 1, super::MAX_IMAGE_ALLOC).unwrap_err();
+        assert!(matches!(err, image::ImageError::Limits(_)), "{err}");
     }
 
     #[test]

@@ -450,6 +450,7 @@ fn usage_failures_exit_2_before_fetch() {
         vec!["--format", "pdf", url.as_str()],
         vec!["-o", "-", url.as_str()],
         vec!["-o", "story.pdf", url.as_str()],
+        vec!["-format", url.as_str()],
     ] {
         let out = folio(&dir, &args);
         assert_eq!(out.status, 2, "args={args:?} stderr={}", out.stderr);
@@ -457,6 +458,15 @@ fn usage_failures_exit_2_before_fetch() {
     }
     assert_eq!(server.html_hits.load(Ordering::SeqCst), before);
     assert!(!dir.join("story.pdf").exists());
+    assert!(!dir.join("rmat").exists());
+    let dashed = folio(&dir, &["-format", &url]);
+    assert!(
+        dashed
+            .stderr
+            .contains("error: --format takes two dashes; -f is --force"),
+        "{}",
+        dashed.stderr
+    );
 
     let bare = folio(&dir, &[]);
     assert_eq!(bare.status, 2);
@@ -491,6 +501,26 @@ fn refuses_missing_parent_directory_and_device_slug() {
     std::fs::create_dir(dir.join("a-dir")).unwrap();
     let as_dir = folio(&dir, &["-o", "a-dir", &format!("{}/article", server.base)]);
     assert_eq!(as_dir.status, 1, "stderr={}", as_dir.stderr);
+
+    std::fs::write(dir.join("notdir"), b"file").unwrap();
+    let before = server.html_hits.load(Ordering::SeqCst);
+    let parent_file = folio(
+        &dir,
+        &[
+            "-o",
+            "notdir/book.epub",
+            &format!("{}/article", server.base),
+        ],
+    );
+    assert_eq!(parent_file.status, 1, "stderr={}", parent_file.stderr);
+    assert!(
+        parent_file
+            .stderr
+            .contains("error: output parent is not a directory: notdir"),
+        "{}",
+        parent_file.stderr
+    );
+    assert_eq!(server.html_hits.load(Ordering::SeqCst), before);
 }
 
 #[test]

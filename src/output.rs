@@ -66,11 +66,18 @@ fn validate_output_path(path: &Path, opts: &Options, from_flag: bool) -> Result<
         }
     }
     if let Some(parent) = parent_dir(path) {
-        if !parent.exists() {
-            return Err(Error::NoParent(parent.display().to_string()));
-        }
-        if !parent.is_dir() {
-            return Err(Error::NoParent(parent.display().to_string()));
+        match fs::metadata(parent) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Err(Error::ParentNotDir(parent.display().to_string())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Error::NoParent(parent.display().to_string()));
+            }
+            Err(err) => {
+                return Err(Error::UnusablePath {
+                    path: path.display().to_string(),
+                    reason: err.to_string(),
+                });
+            }
         }
     }
     match fs::metadata(path) {
@@ -78,8 +85,37 @@ fn validate_output_path(path: &Path, opts: &Options, from_flag: bool) -> Result<
         Ok(_) if !opts.force => Err(Error::Exists(path.display().to_string())),
         Ok(_) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(Error::Write(err.to_string())),
+        Err(err) => Err(Error::UnusablePath {
+            path: path.display().to_string(),
+            reason: err.to_string(),
+        }),
     }
+}
+
+/// Unix `rename` replaces an existing file. Windows does not, so move the
+/// destination aside and put it back if the new name fails.
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        if fs::symlink_metadata(to).is_ok() {
+            return replace_via_backup(from, to);
+        }
+    }
+    fs::rename(from, to)
+}
+
+#[cfg(windows)]
+fn replace_via_backup(from: &Path, to: &Path) -> std::io::Result<()> {
+    let name = to.file_name().unwrap_or_default().to_string_lossy();
+    let mut backup = to.to_path_buf();
+    backup.set_file_name(format!(".{name}.{}.folio-old", std::process::id()));
+    fs::rename(to, &backup)?;
+    if let Err(err) = fs::rename(from, to) {
+        let _ = fs::rename(&backup, to);
+        return Err(err);
+    }
+    let _ = fs::remove_file(&backup);
+    Ok(())
 }
 
 fn path_is_dash(path: &Path) -> bool {
@@ -117,7 +153,7 @@ impl TempFile {
         if let Ok(file) = File::open(&self.path) {
             let _ = file.sync_all();
         }
-        fs::rename(&self.path, final_path).map_err(|err| Error::Write(err.to_string()))?;
+        replace_file(&self.path, final_path).map_err(|err| Error::Write(err.to_string()))?;
         self.keep = true;
         if let Ok(mut guard) = TEMP_PATH.lock() {
             if guard.as_ref() == Some(&self.path) {

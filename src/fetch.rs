@@ -66,8 +66,16 @@ pub fn fetch_html(http: &Client, typed_url: &Url, verbose: bool) -> Result<Page,
         return Err(Error::TooLarge(response_url.to_string()));
     }
     let content_type = header_str(&response, reqwest::header::CONTENT_TYPE);
-    let bytes = read_capped(response, MAX_HTML_BYTES)
-        .map_err(|_| Error::TooLarge(response_url.to_string()))?;
+    let bytes = read_capped(response, MAX_HTML_BYTES).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::FileTooLarge {
+            Error::TooLarge(response_url.to_string())
+        } else {
+            Error::Fetch {
+                url: response_url.to_string(),
+                reason: err.to_string(),
+            }
+        }
+    })?;
     let html = decode_html(&bytes, content_type.as_deref());
     Ok(Page { response_url, html })
 }
@@ -80,18 +88,44 @@ fn header_str(response: &Response, name: reqwest::header::HeaderName) -> Option<
         .map(str::to_string)
 }
 
-fn read_capped(mut response: Response, max: usize) -> Result<Vec<u8>, ()> {
+fn read_capped(mut reader: impl Read, max: usize) -> Result<Vec<u8>, std::io::Error> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
-        let read = response.read(&mut chunk).map_err(|_| ())?;
+        let read = reader.read(&mut chunk)?;
         if read == 0 {
             return Ok(buf);
         }
         if buf.len() + read > max {
-            return Err(());
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "response exceeds the byte cap",
+            ));
         }
         buf.extend_from_slice(&chunk[..read]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_capped;
+    use std::io::{self, Read};
+
+    struct FailRead;
+
+    impl Read for FailRead {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::ConnectionReset, "reset"))
+        }
+    }
+
+    #[test]
+    fn short_read_is_io_and_overflow_is_the_cap() {
+        let err = read_capped(FailRead, 100).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+
+        let err = read_capped(std::io::Cursor::new(vec![1u8, 2, 3, 4]), 3).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::FileTooLarge);
     }
 }
 
