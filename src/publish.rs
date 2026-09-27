@@ -10,12 +10,20 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 use crate::article::{extract_article, fragment_has_text};
 use crate::cli::Options;
 use crate::error::Error;
-use crate::fetch::{self, client};
+use crate::fetch::{self, Page, client};
 use crate::images::{self, ImageWarnings};
-use crate::meta::read_meta_doc;
+use crate::meta::{self, read_meta_doc};
 use crate::output::{self, TempFile};
+use crate::reader::{self, ReaderScan};
 use crate::sanitize;
 use crate::xhtml;
+
+struct Composed {
+    title: String,
+    meta: meta::PageMeta,
+    xhtml: String,
+    images: Vec<images::EmbeddedImage>,
+}
 
 /// This ticket fetches one page. `max_pages` is validated by the CLI and kept for later tickets.
 fn pages_fetched(max_pages: u8) -> u8 {
@@ -29,16 +37,74 @@ pub fn publish(opts: Options) -> Result<std::path::PathBuf, Error> {
     let explicit = output::prepare_explicit_output(&opts)?;
     let http = client()?;
     let page = fetch::fetch_html(&http, &typed, opts.verbose)?;
-    let doc = Document::from(page.html.as_str());
-    let meta = read_meta_doc(&doc, &page.response_url, &typed);
-    let title = meta
-        .title
-        .clone()
-        .ok_or_else(|| Error::MissingTitle(typed.to_string()))?;
+    let composed = choose_source(&http, &page, &typed, opts.verbose)?;
     let output = match explicit {
         Some(path) => path,
-        None => output::path_from_title(&title, &opts)?,
+        None => output::path_from_title(&composed.title, &opts)?,
     };
+    let temp = TempFile::new(&output)?;
+    write_epub(
+        &temp,
+        &composed.title,
+        &composed.meta,
+        &composed.xhtml,
+        &composed.images,
+    )?;
+    temp.persist(&output)?;
+    Ok(output)
+}
+
+fn choose_source(
+    http: &reqwest::blocking::Client,
+    page: &Page,
+    typed: &url::Url,
+    verbose: bool,
+) -> Result<Composed, Error> {
+    let scan = {
+        let doc = Document::from(page.html.as_str());
+        let base = meta::document_base(&doc, &page.response_url);
+        reader::scan(&doc, &base)
+    };
+    if verbose {
+        eprintln!("{}", scan.verbose_line());
+    }
+    match scan {
+        ReaderScan::One(hit) => match fetch::fetch_html(http, &hit.url, verbose) {
+            Ok(reader_page) => match compose(http, &reader_page, typed) {
+                Ok(composed) => Ok(composed),
+                Err(err) => fallback(http, page, typed, &hit.url, err),
+            },
+            Err(err) => fallback(http, page, typed, &hit.url, err),
+        },
+        ReaderScan::None | ReaderScan::Several => compose(http, page, typed),
+    }
+}
+
+fn fallback(
+    http: &reqwest::blocking::Client,
+    page: &Page,
+    typed: &url::Url,
+    reader_url: &url::Url,
+    err: Error,
+) -> Result<Composed, Error> {
+    match reader::failure_status(&err) {
+        Some(status) => {
+            eprintln!(
+                "warning: reader view failed ({reader_url}, {status}); used the article page"
+            );
+            compose(http, page, typed)
+        }
+        None => Err(err),
+    }
+}
+
+fn compose(
+    http: &reqwest::blocking::Client,
+    page: &Page,
+    typed: &url::Url,
+) -> Result<Composed, Error> {
+    let doc = Document::from(page.html.as_str());
+    let meta = read_meta_doc(&doc, &page.response_url, typed);
     images::recover_specials(&doc);
     let html = doc
         .tree
@@ -54,14 +120,20 @@ pub fn publish(opts: Options) -> Result<std::path::PathBuf, Error> {
             url: typed.to_string(),
         });
     }
+    let title = meta
+        .title
+        .clone()
+        .ok_or_else(|| Error::MissingTitle(typed.to_string()))?;
     let mut warnings = ImageWarnings::default();
-    let (with_images, embedded) = images::download_images(&cleaned, &http, &mut warnings);
+    let (with_images, embedded) = images::download_images(&cleaned, http, &mut warnings);
     warnings.emit();
     let xhtml = xhtml::to_xhtml(&with_images, &meta.language, &title);
-    let temp = TempFile::new(&output)?;
-    write_epub(&temp, &title, &meta, &xhtml, &embedded)?;
-    temp.persist(&output)?;
-    Ok(output)
+    Ok(Composed {
+        title,
+        meta,
+        xhtml,
+        images: embedded,
+    })
 }
 
 fn write_epub(
