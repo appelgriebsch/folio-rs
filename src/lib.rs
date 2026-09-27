@@ -9,8 +9,10 @@ mod images;
 mod meta;
 mod output;
 mod publish;
+mod reader;
 mod sanitize;
 mod slug;
+mod toc;
 mod xhtml;
 
 use crate::error::Error;

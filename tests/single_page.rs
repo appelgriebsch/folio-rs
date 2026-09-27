@@ -14,6 +14,7 @@ struct Server {
     base: String,
     html_hits: Arc<AtomicUsize>,
     image_hits: Arc<AtomicUsize>,
+    miss_hits: Arc<AtomicUsize>,
     png: Vec<u8>,
 }
 
@@ -24,19 +25,22 @@ impl Server {
         let addr = listener.local_addr().unwrap();
         let html_hits = Arc::new(AtomicUsize::new(0));
         let image_hits = Arc::new(AtomicUsize::new(0));
+        let miss_hits = Arc::new(AtomicUsize::new(0));
         let html_hits_t = Arc::clone(&html_hits);
         let image_hits_t = Arc::clone(&image_hits);
+        let miss_hits_t = Arc::clone(&miss_hits);
         let png_t = png.clone();
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let _ = handle(stream, &html_hits_t, &image_hits_t, &png_t);
+                let _ = handle(stream, &html_hits_t, &image_hits_t, &miss_hits_t, &png_t);
             }
         });
         Self {
             base: format!("http://{addr}"),
             html_hits,
             image_hits,
+            miss_hits,
             png,
         }
     }
@@ -46,6 +50,7 @@ fn handle(
     mut stream: TcpStream,
     html_hits: &AtomicUsize,
     image_hits: &AtomicUsize,
+    miss_hits: &AtomicUsize,
     png: &[u8],
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -92,12 +97,91 @@ fn handle(
                 "</article></body></html>",
             )
         }
-        "/script" => {
+        "/script" | "/empty-reader" => {
             html_hits.fetch_add(1, Ordering::SeqCst);
             "<html><head><title>Shell</title></head><body><script>document.write('hidden')</script></body></html>"
                 .to_string()
         }
+        "/one-reader" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            reader_fixture(
+                &host_of(&req),
+                "Typed Headline",
+                "TYPED_PAGE_MARKER",
+                "typed-canonical",
+                "de",
+                r#"<link rel="reader" href="/reader-doc">"#,
+                "",
+                false,
+            )
+        }
+        "/reader-doc" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            reader_fixture(
+                &host_of(&req),
+                "Reader Headline",
+                "READER_PAGE_MARKER",
+                "reader-canonical",
+                "en",
+                "",
+                r#"<p><a rel="reader" href="/second-hop">Elsewhere</a></p>"#,
+                true,
+            )
+        }
+        "/second-hop" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            reader_fixture(
+                &host_of(&req),
+                "Second Hop",
+                "SECOND_HOP_MARKER",
+                "second-canonical",
+                "en",
+                "",
+                "",
+                false,
+            )
+        }
+        "/several-readers" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            reader_fixture(
+                &host_of(&req),
+                "Several Headline",
+                "SEVERAL_PAGE_MARKER",
+                "several-canonical",
+                "de",
+                r#"<link rel="reader" href="/reader-a"><link rel="readmode" href="/reader-b">"#,
+                "",
+                false,
+            )
+        }
+        "/reader-miss" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            reader_fixture(
+                &host_of(&req),
+                "Fallback Headline",
+                "FALLBACK_PAGE_MARKER",
+                "fallback-canonical",
+                "de",
+                r#"<link rel="reader" href="/missing-reader">"#,
+                "",
+                false,
+            )
+        }
+        "/reader-empty" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            reader_fixture(
+                &host_of(&req),
+                "Empty Fallback Headline",
+                "EMPTY_FALLBACK_MARKER",
+                "empty-fallback-canonical",
+                "de",
+                r#"<link rel="reader" href="/empty-reader">"#,
+                "",
+                false,
+            )
+        }
         _ => {
+            miss_hits.fetch_add(1, Ordering::SeqCst);
             return respond(&mut stream, "404 Not Found", "text/plain", b"missing");
         }
     };
@@ -155,17 +239,60 @@ fn article_html(host: &str, title: &str, rev: &str, with_date: bool) -> String {
           {date}
           <link rel="canonical" href="http://{host}/canonical-article">
           <meta property="og:description" content="og description">
+          <meta property="og:image" content="http://{host}/photo.png">
         </head>
         <body>
           <article>
             <p>FOLIO_ARTICLE_TEXT rev {rev}. The quick brown fox reads this folio article about rust, epub export, and fish &amp; chips. It keeps going so the extractor has a real paragraph to score, with commas, and enough words to look like the story itself.</p>
             <p>Second paragraph of the same article, still about the folio export, with more sentences so readability keeps this node and not the chrome around it. The photo sits beside the copy.</p>
+            <h2 id="kept-section">Kept section</h2>
             <p>Third paragraph continues the account of how a single page becomes one file, without fetching another page and without running a script.</p>
+            <h3>Nested part</h3>
             <img src="/photo.png" alt="folio photo">
             <script>SECRET_SCRIPT_PAYLOAD</script>
             <iframe src="https://evil.example/frame">SECRET_IFRAME_PAYLOAD</iframe>
             <audio src="/a.mp3">SECRET_AUDIO_PAYLOAD</audio>
             <video src="/v.mp4">SECRET_VIDEO_PAYLOAD</video>
+          </article>
+        </body>
+        </html>"#
+    )
+}
+
+fn reader_fixture(
+    host: &str,
+    title: &str,
+    marker: &str,
+    canonical: &str,
+    lang: &str,
+    extra_head: &str,
+    extra_body: &str,
+    with_reader_meta: bool,
+) -> String {
+    let meta = if with_reader_meta {
+        r#"<script type="application/ld+json">
+              {"@type":"NewsArticle","headline":"Reader Headline","datePublished":"2020-02-03",
+               "author":{"@type":"Person","name":"Grace Hopper"},"description":"From the reader"}
+            </script>"#
+    } else {
+        ""
+    };
+    format!(
+        r#"<!DOCTYPE html>
+        <html lang="{lang}">
+        <head>
+          <meta charset="utf-8">
+          <title>{title}</title>
+          <link rel="canonical" href="http://{host}/{canonical}">
+          {meta}
+          {extra_head}
+        </head>
+        <body>
+          {extra_body}
+          <article>
+            <p>{marker}. The quick brown fox reads this folio article about rust, epub export, and fish and chips. It keeps going so the extractor has a real paragraph to score, with commas, and enough words to look like the story itself.</p>
+            <p>Second paragraph of the same article, still about the folio export, with more sentences so readability keeps this node and not the chrome around it.</p>
+            <p>Third paragraph continues the account of how a single page becomes one file, without fetching another page and without running a script.</p>
           </article>
         </body>
         </html>"#
@@ -334,6 +461,23 @@ fn writes_epub_with_metadata_image_and_without_active_content() {
             .any(|bytes| bytes == &server.png)
     );
     assert!(server.image_hits.load(Ordering::SeqCst) >= 1);
+    let cover = epub.manifest().cover_image().expect("banner is the cover");
+    assert_eq!(cover.read_bytes().unwrap(), server.png);
+    let toc = epub.toc().contents().unwrap();
+    let chapter = toc.get(0).unwrap();
+    assert_eq!(chapter.label(), "Article Headline");
+    assert_eq!(chapter.len(), 1, "section entries");
+    let section = chapter.get(0).unwrap();
+    assert_eq!(section.label(), "Kept section");
+    let section_href = section.href_raw().unwrap().to_string();
+    assert!(
+        section_href.contains("chapter.xhtml#kept-section"),
+        "{section_href}"
+    );
+    let nested = section.get(0).unwrap();
+    assert_eq!(nested.label(), "Nested part");
+    assert!(nested.href_raw().unwrap().to_string().contains('#'));
+    assert!(nested.is_empty());
 }
 
 #[test]
@@ -521,6 +665,128 @@ fn refuses_missing_parent_directory_and_device_slug() {
         parent_file.stderr
     );
     assert_eq!(server.html_hits.load(Ordering::SeqCst), before);
+}
+
+#[test]
+fn one_reader_link_builds_the_epub_from_that_document() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/one-reader", server.base);
+    let before = server.html_hits.load(Ordering::SeqCst);
+    let out = folio(&dir, &["-v", "-o", "reader.epub", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert!(
+        out.stderr
+            .contains(&format!("reader view: {}/reader-doc (rel)", server.base)),
+        "{}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains("warning:"), "{}", out.stderr);
+    assert_eq!(server.html_hits.load(Ordering::SeqCst), before + 2);
+    assert_eq!(server.miss_hits.load(Ordering::SeqCst), 0);
+    let epub = open_epub(&dir.join("reader.epub"));
+    let text = resource_text(&epub);
+    assert!(text.contains("READER_PAGE_MARKER"), "{text}");
+    assert!(!text.contains("TYPED_PAGE_MARKER"), "{text}");
+    assert!(!text.contains("SECOND_HOP_MARKER"), "{text}");
+    assert_eq!(epub.metadata().title().unwrap().value(), "Reader Headline");
+    assert_eq!(
+        epub.metadata().identifier().unwrap().value(),
+        format!("{}/reader-canonical", server.base)
+    );
+    assert_eq!(epub.metadata().languages().next().unwrap().value(), "en");
+    let published = epub.metadata().published().unwrap();
+    assert_eq!(published.date().year(), 2020);
+    assert_eq!(published.date().month(), 2);
+    assert_eq!(published.date().day(), 3);
+    let creators: Vec<_> = epub
+        .metadata()
+        .creators()
+        .map(|creator| creator.value().to_string())
+        .collect();
+    assert_eq!(creators, vec!["Grace Hopper".to_string()]);
+}
+
+#[test]
+fn several_reader_links_keep_the_typed_page_without_a_warning() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/several-readers", server.base);
+    let before = server.html_hits.load(Ordering::SeqCst);
+    let out = folio(&dir, &["-v", "-o", "several.epub", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("reader view: kept the article page (several reader links)"),
+        "{}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains("warning:"), "{}", out.stderr);
+    assert_eq!(server.html_hits.load(Ordering::SeqCst), before + 1);
+    assert_eq!(server.miss_hits.load(Ordering::SeqCst), 0);
+    let epub = open_epub(&dir.join("several.epub"));
+    let text = resource_text(&epub);
+    assert!(text.contains("SEVERAL_PAGE_MARKER"), "{text}");
+    assert_eq!(epub.metadata().title().unwrap().value(), "Several Headline");
+    assert_eq!(
+        epub.metadata().identifier().unwrap().value(),
+        format!("{}/several-canonical", server.base)
+    );
+}
+
+#[test]
+fn failed_reader_fetch_warns_and_uses_the_typed_page() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/reader-miss", server.base);
+    let reader = format!("{}/missing-reader", server.base);
+    let out = folio(&dir, &["-v", "-o", "fallback.epub", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert!(
+        out.stderr.contains(&format!("reader view: {reader} (rel)")),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains(&format!(
+            "warning: reader view failed ({reader}, 404); used the article page"
+        )),
+        "{}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains("error:"), "{}", out.stderr);
+    assert_eq!(server.miss_hits.load(Ordering::SeqCst), 1);
+    let epub = open_epub(&dir.join("fallback.epub"));
+    let text = resource_text(&epub);
+    assert!(text.contains("FALLBACK_PAGE_MARKER"), "{text}");
+    assert_eq!(
+        epub.metadata().title().unwrap().value(),
+        "Fallback Headline"
+    );
+    assert_eq!(
+        epub.metadata().identifier().unwrap().value(),
+        format!("{}/fallback-canonical", server.base)
+    );
+
+    let empty_url = format!("{}/reader-empty", server.base);
+    let empty_reader = format!("{}/empty-reader", server.base);
+    let empty = folio(&dir, &["-o", "empty-fallback.epub", &empty_url]);
+    assert_eq!(empty.status, 0, "stderr={}", empty.stderr);
+    assert!(
+        empty.stderr.contains(&format!(
+            "warning: reader view failed ({empty_reader}, no article text); used the article page"
+        )),
+        "{}",
+        empty.stderr
+    );
+    assert!(!empty.stderr.contains("error:"), "{}", empty.stderr);
+    let epub = open_epub(&dir.join("empty-fallback.epub"));
+    let text = resource_text(&epub);
+    assert!(text.contains("EMPTY_FALLBACK_MARKER"), "{text}");
+    assert!(
+        !text.contains("SECRET") && !text.contains("hidden"),
+        "{text}"
+    );
 }
 
 #[test]

@@ -464,6 +464,19 @@ fn inside_picture(node: &NodeRef<'_>) -> bool {
         .any(|ancestor| name_is(ancestor, "picture"))
 }
 
+/// Fetch one http(s) or data image for the EPUB cover. The href is `images/cover.{ext}`.
+pub fn download_cover(client: &Client, url: &str) -> Option<EmbeddedImage> {
+    let mut image = fetch_image(client, url, 1).ok()?;
+    let extension = image
+        .href
+        .rsplit('.')
+        .next()
+        .filter(|ext| !ext.is_empty())
+        .unwrap_or("img");
+    image.href = format!("images/cover.{extension}");
+    Some(image)
+}
+
 pub fn download_images(
     html: &str,
     client: &Client,
