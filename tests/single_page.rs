@@ -244,7 +244,9 @@ fn article_html(host: &str, title: &str, rev: &str, with_date: bool) -> String {
           <article>
             <p>FOLIO_ARTICLE_TEXT rev {rev}. The quick brown fox reads this folio article about rust, epub export, and fish &amp; chips. It keeps going so the extractor has a real paragraph to score, with commas, and enough words to look like the story itself.</p>
             <p>Second paragraph of the same article, still about the folio export, with more sentences so readability keeps this node and not the chrome around it. The photo sits beside the copy.</p>
+            <h2 id="kept-section">Kept section</h2>
             <p>Third paragraph continues the account of how a single page becomes one file, without fetching another page and without running a script.</p>
+            <h3>Nested part</h3>
             <img src="/photo.png" alt="folio photo">
             <script>SECRET_SCRIPT_PAYLOAD</script>
             <iframe src="https://evil.example/frame">SECRET_IFRAME_PAYLOAD</iframe>
@@ -458,6 +460,21 @@ fn writes_epub_with_metadata_image_and_without_active_content() {
             .any(|bytes| bytes == &server.png)
     );
     assert!(server.image_hits.load(Ordering::SeqCst) >= 1);
+    let toc = epub.toc().contents().unwrap();
+    let chapter = toc.get(0).unwrap();
+    assert_eq!(chapter.label(), "Article Headline");
+    assert_eq!(chapter.len(), 1, "section entries");
+    let section = chapter.get(0).unwrap();
+    assert_eq!(section.label(), "Kept section");
+    let section_href = section.href_raw().unwrap().to_string();
+    assert!(
+        section_href.contains("chapter.xhtml#kept-section"),
+        "{section_href}"
+    );
+    let nested = section.get(0).unwrap();
+    assert_eq!(nested.label(), "Nested part");
+    assert!(nested.href_raw().unwrap().to_string().contains('#'));
+    assert!(nested.is_empty());
 }
 
 #[test]

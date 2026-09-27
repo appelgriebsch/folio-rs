@@ -9,7 +9,7 @@ const VOID: &[&str] = &[
 pub fn to_xhtml(fragment: &str, lang: &str, title: &str) -> String {
     let body = serialize_fragment(fragment);
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"{lang}\" lang=\"{lang}\">\n<head><title>{}</title></head>\n<body>\n{body}\n</body>\n</html>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"{lang}\" lang=\"{lang}\">\n<head><title>{}</title><style type=\"text/css\">img {{ max-width: 100%; height: auto; }}</style></head>\n<body>\n{body}\n</body>\n</html>\n",
         escape_text(title)
     )
 }
@@ -81,6 +81,10 @@ fn write_node(node: &NodeRef<'_>, out: &mut String) {
         if local.eq_ignore_ascii_case("data-folio-src") {
             continue;
         }
+        // Pixel width and height pin an image larger than an ereader screen.
+        if name == "img" && matches!(local, "width" | "height" | "style") {
+            continue;
+        }
         if !is_xml_name(local) {
             continue;
         }
@@ -89,6 +93,9 @@ fn write_node(node: &NodeRef<'_>, out: &mut String) {
         out.push_str("=\"");
         out.push_str(&escape_attr(&attr.value));
         out.push('"');
+    }
+    if name == "img" {
+        out.push_str(" style=\"max-width: 100%; height: auto;\"");
     }
     if VOID.contains(&name.as_str()) {
         out.push_str("/>");
@@ -121,7 +128,7 @@ mod tests {
     #[test]
     fn escapes_ampersand_and_closes_void_tags() {
         let xhtml = to_xhtml(
-            r#"<p id="p" dir="ltr">fish & chips</p><br><img src="a.png?x=1&y=2" alt="x">"#,
+            r#"<p id="p" dir="ltr">fish & chips</p><br><img src="a.png?x=1&y=2" width="2560" height="1440" alt="x">"#,
             "en",
             "A & B",
         );
@@ -130,6 +137,16 @@ mod tests {
         assert!(xhtml.contains("<br/>"), "{xhtml}");
         assert!(xhtml.contains("x=1&amp;y=2"), "{xhtml}");
         assert!(xhtml.contains("<img "), "{xhtml}");
+        assert!(!xhtml.contains("width="), "{xhtml}");
+        assert!(!xhtml.contains("height="), "{xhtml}");
+        assert!(
+            xhtml.contains("style=\"max-width: 100%; height: auto;\""),
+            "{xhtml}"
+        );
+        assert!(
+            xhtml.contains("img { max-width: 100%; height: auto; }"),
+            "{xhtml}"
+        );
         assert!(xhtml.contains("/>"), "{xhtml}");
         assert!(!xhtml.contains("<br>"), "{xhtml}");
         assert!(

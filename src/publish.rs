@@ -4,6 +4,7 @@ use dom_query::Document;
 use rbook::Epub;
 use rbook::epub::EpubChapter;
 use rbook::epub::manifest::DetachedEpubManifestEntry;
+use rbook::epub::toc::DetachedEpubTocEntry;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -16,6 +17,7 @@ use crate::meta::{self, read_meta_doc};
 use crate::output::{self, TempFile};
 use crate::reader::{self, ReaderScan};
 use crate::sanitize;
+use crate::toc::{self, Section};
 use crate::xhtml;
 
 struct Composed {
@@ -23,6 +25,7 @@ struct Composed {
     meta: meta::PageMeta,
     xhtml: String,
     images: Vec<images::EmbeddedImage>,
+    outline: Vec<Section>,
 }
 
 /// This ticket fetches one page. `max_pages` is validated by the CLI and kept for later tickets.
@@ -49,6 +52,7 @@ pub fn publish(opts: Options) -> Result<std::path::PathBuf, Error> {
         &composed.meta,
         &composed.xhtml,
         &composed.images,
+        &composed.outline,
     )?;
     temp.persist(&output)?;
     Ok(output)
@@ -113,26 +117,34 @@ fn compose(
         .map(|value| value.to_string())
         .unwrap_or_else(|| page.html.clone());
     let article = extract_article(&html, &meta.base, typed.as_str())?;
-    let flattened = images::flatten_images(&article.html, &meta.base);
+    let title = meta
+        .title
+        .clone()
+        .ok_or_else(|| Error::MissingTitle(typed.to_string()))?;
+    let headed = crate::article::with_header(
+        &article.html,
+        &title,
+        &meta.authors,
+        meta.published.as_deref(),
+    );
+    let flattened = images::flatten_images(&headed, &meta.base);
     let cleaned = sanitize::clean(&flattened);
     if !fragment_has_text(&cleaned) {
         return Err(Error::NoArticle {
             url: typed.to_string(),
         });
     }
-    let title = meta
-        .title
-        .clone()
-        .ok_or_else(|| Error::MissingTitle(typed.to_string()))?;
     let mut warnings = ImageWarnings::default();
     let (with_images, embedded) = images::download_images(&cleaned, http, &mut warnings);
     warnings.emit();
-    let xhtml = xhtml::to_xhtml(&with_images, &meta.language, &title);
+    let (anchored, outline) = toc::anchor_outline(&with_images);
+    let xhtml = xhtml::to_xhtml(&anchored, &meta.language, &title);
     Ok(Composed {
         title,
         meta,
         xhtml,
         images: embedded,
+        outline,
     })
 }
 
@@ -142,6 +154,7 @@ fn write_epub(
     meta: &crate::meta::PageMeta,
     xhtml_doc: &str,
     images: &[images::EmbeddedImage],
+    outline: &[Section],
 ) -> Result<(), Error> {
     let mut editor = Epub::builder()
         .identifier(meta.identifier.as_str())
@@ -165,11 +178,11 @@ fn write_epub(
                 .content(image.bytes.clone()),
         );
     }
-    editor = editor.chapter(
-        EpubChapter::new(title)
-            .href("chapter.xhtml")
-            .xhtml(xhtml_doc.as_bytes().to_vec()),
-    );
+    let chapter = EpubChapter::new(title)
+        .href("chapter.xhtml")
+        .with_toc_entry(contents_entry(title, outline))
+        .xhtml(xhtml_doc.as_bytes().to_vec());
+    editor = editor.chapter(chapter);
     let mut bytes = editor
         .write()
         .to_vec()
@@ -180,6 +193,35 @@ fn write_epub(
     }
     std::fs::write(temp.path(), bytes).map_err(|err| Error::Write(err.to_string()))?;
     Ok(())
+}
+
+fn contents_entry(title: &str, outline: &[Section]) -> DetachedEpubTocEntry {
+    let mut entry = DetachedEpubTocEntry::new(title).href("chapter.xhtml");
+    for section in outline {
+        entry = entry.children(section_entry(section));
+    }
+    entry
+}
+
+fn section_entry(section: &Section) -> DetachedEpubTocEntry {
+    let href = format!("chapter.xhtml#{}", fragment(&section.id));
+    let mut entry = DetachedEpubTocEntry::new(section.label.as_str()).href(href);
+    for child in &section.children {
+        entry = entry.children(section_entry(child));
+    }
+    entry
+}
+
+fn fragment(id: &str) -> String {
+    let mut encoded = String::new();
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn strip_generated_dc_date(bytes: Vec<u8>) -> Result<Vec<u8>, Error> {

@@ -28,6 +28,108 @@ pub fn extract_article(html: &str, base: &url::Url, page_url: &str) -> Result<Ar
     })
 }
 
+/// Title and byline belong at the top. Reader extraction drops an `h1` that
+/// matches the page title, and a short linked byline, so the body can open
+/// on a kicker such as "glass-terpiece".
+pub fn with_header(html: &str, title: &str, authors: &[String], published: Option<&str>) -> String {
+    let title = title.trim();
+    if title.is_empty() {
+        return html.to_string();
+    }
+    let doc = Document::fragment(html);
+    let want = flat(title);
+    for heading in doc.select("h1, h2, h3, h4, h5, h6").nodes() {
+        if flat(&heading.text()) == want {
+            heading.remove_from_parent();
+        }
+    }
+    let body = doc.tree.root().inner_html().to_string();
+    let mut out = format!("<h1>{}</h1>", crate::xhtml::escape_text(title));
+    if let Some(line) = byline_line(&body, authors, published) {
+        out.push_str("<p>");
+        out.push_str(&crate::xhtml::escape_text(&line));
+        out.push_str("</p>");
+    }
+    out.push_str(&body);
+    out
+}
+
+fn byline_line(body: &str, authors: &[String], published: Option<&str>) -> Option<String> {
+    let opening = opening_text(body);
+    let names: Vec<&str> = authors
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .collect();
+    let author_present = names.iter().any(|name| opening.contains(&flat(name)));
+    let date = published
+        .map(display_date)
+        .filter(|value| !value.is_empty());
+    let date_present = date
+        .as_deref()
+        .is_some_and(|value| opening.contains(&flat(value)))
+        || published.is_some_and(|value| {
+            let day = value.trim();
+            let day = day.get(..10).unwrap_or(day);
+            !day.is_empty() && opening.contains(&flat(day))
+        });
+    if names.is_empty() && date.is_none() {
+        return None;
+    }
+    if author_present && (date_present || date.is_none()) {
+        return None;
+    }
+    if !author_present && date_present && names.is_empty() {
+        return None;
+    }
+    let mut line = names.join(", ");
+    if let Some(date) = date.filter(|_| !date_present) {
+        if !line.is_empty() {
+            line.push_str(" — ");
+        }
+        line.push_str(&date);
+    }
+    if line.is_empty() { None } else { Some(line) }
+}
+
+fn opening_text(html: &str) -> String {
+    let doc = Document::fragment(html);
+    let text = flat(&doc.tree.root().text());
+    text.chars().take(500).collect()
+}
+
+fn flat(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn display_date(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let normalized = trimmed.replace('/', "-");
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 10 && bytes[4] == b'-' && bytes[7] == b'-' {
+        let year = &normalized[0..4];
+        let month: u32 = normalized[5..7].parse().unwrap_or(0);
+        let day: u32 = normalized[8..10].parse().unwrap_or(0);
+        if let Some(name) = month_name(month)
+            && (1..=31).contains(&day)
+            && year.chars().all(|ch| ch.is_ascii_digit())
+        {
+            return format!("{name} {day}, {year}");
+        }
+    }
+    trimmed.to_string()
+}
+
+fn month_name(month: u32) -> Option<&'static str> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    MONTHS.get(month.checked_sub(1)? as usize).copied()
+}
+
 pub fn has_text(text: &str) -> bool {
     text.chars().any(|ch| !ch.is_whitespace())
 }
@@ -215,5 +317,56 @@ mod tests {
             rewrite_overflow_hidden("hidden md:block"),
             "hidden md:block"
         );
+    }
+
+    #[test]
+    fn header_title_and_byline_precede_the_kicker() {
+        let html = r#"<!DOCTYPE html><html><head>
+            <title>macOS 26 Tahoe: The Ars Technica review - Ars Technica</title>
+            <meta property="og:title" content="macOS 26 Tahoe: The Ars Technica review">
+            <script type="application/ld+json">
+              {"@type":"NewsArticle","headline":"macOS 26 Tahoe: The Ars Technica review",
+               "datePublished":"2025-09-15T13:00:27-04:00",
+               "author":{"@type":"Person","name":"Andrew Cunningham"}}
+            </script>
+            </head><body><article><header>
+            <p>glass-terpiece</p>
+            <h1>macOS 26 Tahoe: The Ars Technica review</h1>
+            <p>Liquid Glass brings translucent sheen to the typical batch of iterative changes.</p>
+            <div><a href="https://news.example/author/andrew">Andrew Cunningham</a> – <time datetime="2025-09-15">Sep 15, 2025</time></div>
+            </header>
+            <p>The last time Apple gave macOS a fresh design was in 2020, and this paragraph has commas, and enough words to be the article.</p>
+            <p>Second paragraph continues the review, with commas, so the extractor keeps the story and the header around it.</p>
+            <p>Third paragraph names the release and keeps the score high enough for a short page.</p>
+            </article></body></html>"#;
+        let base = url::Url::parse("https://news.example/tahoe").unwrap();
+        let article = extract_article(html, &base, base.as_str()).unwrap();
+        let headed = with_header(
+            &article.html,
+            "macOS 26 Tahoe: The Ars Technica review",
+            &["Andrew Cunningham".to_string()],
+            Some("2025-09-15T13:00:27-04:00"),
+        );
+        let title_at = headed.find("<h1>").expect(&headed);
+        let kicker_at = headed.find("glass-terpiece").expect(&headed);
+        assert!(title_at < kicker_at, "{headed}");
+        assert!(headed.contains("Andrew Cunningham"), "{headed}");
+        assert!(headed.contains("Sep 15, 2025"), "{headed}");
+        assert_eq!(headed.matches("<h1>").count(), 1, "{headed}");
+        let again = with_header(
+            &headed,
+            "macOS 26 Tahoe: The Ars Technica review",
+            &["Andrew Cunningham".to_string()],
+            Some("2025-09-15T13:00:27-04:00"),
+        );
+        assert_eq!(again.matches("<h1>").count(), 1, "{again}");
+        assert_eq!(again.matches("Andrew Cunningham").count(), 1, "{again}");
+    }
+
+    #[test]
+    fn display_date_uses_the_calendar_day() {
+        assert_eq!(display_date("2025-09-15T17:00:27+00:00"), "Sep 15, 2025");
+        assert_eq!(display_date("2024-05-06"), "May 6, 2024");
+        assert_eq!(display_date("not-a-date"), "not-a-date");
     }
 }

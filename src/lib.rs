@@ -12,6 +12,7 @@ mod publish;
 mod reader;
 mod sanitize;
 mod slug;
+mod toc;
 mod xhtml;
 
 use crate::error::Error;
