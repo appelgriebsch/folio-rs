@@ -2,9 +2,13 @@ use std::io::{Cursor, Read, Write};
 
 use dom_query::Document;
 use rbook::Epub;
+use rbook::ebook::toc::TocEntryKind;
 use rbook::epub::EpubChapter;
 use rbook::epub::manifest::DetachedEpubManifestEntry;
+use rbook::epub::metadata::EpubVersion;
 use rbook::epub::toc::DetachedEpubTocEntry;
+
+use crate::cover::{self, Cover};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -26,8 +30,10 @@ struct Composed {
     xhtml: String,
     images: Vec<images::EmbeddedImage>,
     outline: Vec<Section>,
-    cover: Option<images::EmbeddedImage>,
+    cover: Cover,
 }
+
+const MAX_COVER_CANDIDATES: usize = 3;
 
 /// This ticket fetches one page. `max_pages` is validated by the CLI and kept for later tickets.
 fn pages_fetched(max_pages: u8) -> u8 {
@@ -54,7 +60,7 @@ pub fn publish(opts: Options) -> Result<std::path::PathBuf, Error> {
         &composed.xhtml,
         &composed.images,
         &composed.outline,
-        composed.cover.as_ref(),
+        &composed.cover,
     )?;
     temp.persist(&output)?;
     Ok(output)
@@ -66,23 +72,23 @@ fn choose_source(
     typed: &url::Url,
     verbose: bool,
 ) -> Result<Composed, Error> {
-    let (scan, site_banner) = {
+    let (scan, site_banners) = {
         let doc = Document::from(page.html.as_str());
         let meta = read_meta_doc(&doc, &page.response_url, typed);
-        (reader::scan(&doc, &meta.base), meta.banner)
+        (reader::scan(&doc, &meta.base), meta.banners)
     };
     if verbose {
         eprintln!("{}", scan.verbose_line());
     }
     match scan {
         ReaderScan::One(hit) => match fetch::fetch_html(http, &hit.url, verbose) {
-            Ok(reader_page) => match compose(http, &reader_page, typed, site_banner) {
+            Ok(reader_page) => match compose(http, &reader_page, typed, &site_banners) {
                 Ok(composed) => Ok(composed),
                 Err(err) => fallback(http, page, typed, &hit.url, err),
             },
             Err(err) => fallback(http, page, typed, &hit.url, err),
         },
-        ReaderScan::None | ReaderScan::Several => compose(http, page, typed, None),
+        ReaderScan::None | ReaderScan::Several => compose(http, page, typed, &[]),
     }
 }
 
@@ -98,7 +104,7 @@ fn fallback(
             eprintln!(
                 "warning: reader view failed ({reader_url}, {status}); used the article page"
             );
-            compose(http, page, typed, None)
+            compose(http, page, typed, &[])
         }
         None => Err(err),
     }
@@ -108,7 +114,7 @@ fn compose(
     http: &reqwest::blocking::Client,
     page: &Page,
     typed: &url::Url,
-    site_banner: Option<String>,
+    site_banners: &[String],
 ) -> Result<Composed, Error> {
     let doc = Document::from(page.html.as_str());
     let meta = read_meta_doc(&doc, &page.response_url, typed);
@@ -138,16 +144,18 @@ fn compose(
         });
     }
     let mut warnings = ImageWarnings::default();
-    let banner = site_banner.or(meta.banner.clone());
-    let cover = banner
-        .as_deref()
-        .and_then(|url| match images::download_cover(http, url) {
-            Some(image) => Some(image),
-            None => {
-                warnings.push(url);
-                None
+    let mut image = None;
+    for url in cover_urls(site_banners, &meta.banners) {
+        match images::download_cover(http, &url) {
+            Some(decoded) => {
+                image = Some(decoded);
+                break;
             }
-        });
+            None => warnings.push(&url),
+        }
+    }
+    let host = typed.host_str().unwrap_or("");
+    let cover = cover::make_cover(image, &title, host);
     let (with_images, embedded) = images::download_images(&cleaned, http, &mut warnings);
     warnings.emit();
     let (anchored, outline) = toc::anchor_outline(&with_images);
@@ -169,7 +177,7 @@ fn write_epub(
     xhtml_doc: &str,
     images: &[images::EmbeddedImage],
     outline: &[Section],
-    cover: Option<&images::EmbeddedImage>,
+    cover: &Cover,
 ) -> Result<(), Error> {
     let mut editor = Epub::builder()
         .identifier(meta.identifier.as_str())
@@ -193,20 +201,35 @@ fn write_epub(
                 .content(image.bytes.clone()),
         );
     }
-    if let Some(cover) = cover {
-        editor = editor.cover_image(
-            DetachedEpubManifestEntry::new("cover")
-                .href(cover.href.as_str())
-                .media_type(cover.media_type.as_str())
-                .content(cover.bytes.clone()),
-        );
-    }
+    editor = editor.cover_image(
+        DetachedEpubManifestEntry::new("cover")
+            .href("images/cover.jpg")
+            .media_type("image/jpeg")
+            .content(cover.bytes.clone()),
+    );
+    let cover_page = EpubChapter::unlisted("cover.xhtml")
+        .with_manifest_entry(
+            DetachedEpubManifestEntry::new("cover-page")
+                .href("cover.xhtml")
+                .property("svg"),
+        )
+        .xhtml(cover_document(cover.width, cover.height).into_bytes());
     let chapter = EpubChapter::new(title)
         .href("chapter.xhtml")
         .with_toc_entry(contents_entry(title, outline))
         .xhtml(xhtml_doc.as_bytes().to_vec());
-    editor = editor.chapter(chapter);
-    let mut bytes = editor
+    editor = editor.chapter([cover_page, chapter]);
+    let mut epub = editor.build();
+    epub.toc_mut().insert_root(
+        TocEntryKind::Landmarks,
+        EpubVersion::EPUB3,
+        DetachedEpubTocEntry::new("Landmarks").children(
+            DetachedEpubTocEntry::new("Cover")
+                .kind(TocEntryKind::Cover)
+                .href("cover.xhtml"),
+        ),
+    );
+    let mut bytes = epub
         .write()
         .to_vec()
         .map_err(|err| Error::Write(err.to_string()))?;
@@ -216,6 +239,33 @@ fn write_epub(
     }
     std::fs::write(temp.path(), bytes).map_err(|err| Error::Write(err.to_string()))?;
     Ok(())
+}
+
+fn cover_urls(preferred: &[String], page: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for url in preferred.iter().chain(page) {
+        if out.iter().any(|have| have == url) {
+            continue;
+        }
+        out.push(url.clone());
+        if out.len() == MAX_COVER_CANDIDATES {
+            break;
+        }
+    }
+    out
+}
+
+fn cover_document(width: u32, height: u32) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head><title>Cover</title></head>
+<body>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 {width} {height}" width="100%" height="100%" preserveAspectRatio="xMidYMid meet"><image width="{width}" height="{height}" xlink:href="images/cover.jpg"/></svg>
+</body>
+</html>
+"#
+    )
 }
 
 fn contents_entry(title: &str, outline: &[Section]) -> DetachedEpubTocEntry {
@@ -264,10 +314,10 @@ fn strip_generated_dc_date(bytes: Vec<u8>) -> Result<Vec<u8>, Error> {
         let mut body = Vec::new();
         file.read_to_end(&mut body)
             .map_err(|err| Error::Write(err.to_string()))?;
-        if name.ends_with(".opf") {
-            if let Ok(text) = std::str::from_utf8(&body) {
-                body = strip_dc_date_elements(text).into_bytes();
-            }
+        if name.ends_with(".opf")
+            && let Ok(text) = std::str::from_utf8(&body)
+        {
+            body = strip_dc_date_elements(text).into_bytes();
         }
         let options = SimpleFileOptions::default().compression_method(method);
         out.start_file(name, options)
