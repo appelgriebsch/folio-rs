@@ -503,7 +503,7 @@ fn composite_layout(width: u32, height: u32, title: &str) -> CompositeLayout {
         origin,
         size,
         lines,
-        rule_y: (origin + block + 40.0).round() as i32,
+        rule_y: (origin + block + 40.0).floor() as i32,
         footer_top: foot,
     }
 }
@@ -1147,6 +1147,23 @@ mod tests {
                     .all(|(got, want)| got.abs_diff(want) <= 12)
             })
         })
+    }
+
+    #[test]
+    fn four_line_title_on_a_1280_band_keeps_the_rule_in_the_budget() {
+        let title = "n".repeat(72);
+        for (width, height) in [(1600u32, 1280u32), (900, 853)] {
+            let layout = composite_layout(width, height, &title);
+            assert!(
+                (layout.rule_y + RULE_PX) as f32 <= layout.footer_top,
+                "{width}x{height}: rule {} footer {}",
+                layout.rule_y,
+                layout.footer_top
+            );
+        }
+        // Hits the debug_assert in render_composite.
+        let cover = make_cover(Some(red(1600, 1280)), &title, "example.com");
+        assert_eq!((cover.width, cover.height), (COVER_W, COVER_H));
     }
 
     #[test]
