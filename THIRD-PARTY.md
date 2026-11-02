@@ -1,6 +1,6 @@
 # Third-party bill of materials
 
-Direct dependencies from `Cargo.toml` / `Cargo.lock`, plus the GitHub Actions used by `.github/workflows/ci.yml`. OSV.dev was queried for the locked crate versions. `ttf-parser` 0.25.1 is [RUSTSEC-2026-0192](https://rustsec.org/advisories/RUSTSEC-2026-0192) (unmaintained; no CVE). No other advisory was reported. No CVE was found for the action refs below.
+Direct dependencies from `Cargo.toml` / `Cargo.lock`, plus the GitHub Actions used by `.github/workflows/ci.yml`. OSV.dev was queried for the locked crate versions. `ttf-parser` 0.25.1 is [RUSTSEC-2026-0192](https://rustsec.org/advisories/RUSTSEC-2026-0192) (unmaintained; no CVE). Andreas accepted it on 2026-11-02: it comes in through `ab_glyph`, there is no CVE, and there is no maintained drop-in. Revisit when a maintained replacement exists. No other advisory was reported. No CVE was found for the action refs below.
 
 | Name | Version | License | Critical update | CVEs |
 | --- | --- | --- | --- | --- |
@@ -22,7 +22,7 @@ Direct dependencies from `Cargo.toml` / `Cargo.lock`, plus the GitHub Actions us
 | reqwest | 0.13.5 | MIT OR Apache-2.0 | | none found |
 | serde_json | 1.0.151 | MIT OR Apache-2.0 | | none found |
 | thiserror | 2.0.21 | MIT OR Apache-2.0 | | none found |
-| ttf-parser | 0.25.1 | MIT OR Apache-2.0 | RUSTSEC-2026-0192 (unmaintained) | none found |
+| ttf-parser | 0.25.1 | MIT OR Apache-2.0 | RUSTSEC-2026-0192 (unmaintained; accepted 2026-11-02, revisit on replacement) | none found |
 | unicode-linebreak | 0.1.5 | Apache-2.0 | | none found |
 | unicode-normalization | 0.1.25 | MIT OR Apache-2.0 | | none found |
 | url | 2.5.8 | MIT OR Apache-2.0 | | none found |

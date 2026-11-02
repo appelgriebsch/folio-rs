@@ -106,17 +106,17 @@ fn dominant_colour(image: &DynamicImage) -> [u8; 3] {
 
 fn fill_from_image(image: &DynamicImage) -> [u8; 3] {
     let rgb = dominant_colour(image);
-    let rgb = if is_flat(rgb) {
+    if is_flat(rgb) {
+        // Flat light image: off-white with black text, not pushed dark (#10, option b).
         if relative_luminance(rgb) > 0.5 {
-            [0xF4, 0xF1, 0xEA]
-        } else {
-            [0x16, 0x16, 0x16]
+            return OFF_WHITE;
         }
-    } else {
-        rgb
-    };
+        return push_dark([0x16, 0x16, 0x16]);
+    }
     push_dark(rgb)
 }
+
+const OFF_WHITE: [u8; 3] = [0xF4, 0xF1, 0xEA];
 
 fn is_flat(rgb: [u8; 3]) -> bool {
     let max = rgb.into_iter().max().unwrap_or(0);
@@ -828,6 +828,39 @@ mod tests {
         let a = make_cover(None, "Hello", "example.com");
         let b = make_cover(None, "Hello", "example.com");
         assert_eq!(a.bytes, b.bytes);
+    }
+
+    #[test]
+    fn flat_light_image_gets_off_white_fill_and_black_text() {
+        let light = DynamicImage::ImageRgb8(RgbImage::from_pixel(800, 500, Rgb([235, 235, 232])));
+        let fill = fill_from_image(&light);
+        assert_eq!(fill, OFF_WHITE);
+        assert_eq!(text_ink(fill), [0, 0, 0]);
+        assert!(contrast(fill, [0, 0, 0]) >= 7.0);
+
+        let cover = make_cover(Some(light), "Flat light", "example.com");
+        let out = decode(&cover.bytes);
+        // Fill below the image box and above the title, away from text.
+        let px = out.get_pixel(40, 2560 - 40).0;
+        for (got, want) in px.iter().zip(OFF_WHITE) {
+            assert!(got.abs_diff(want) <= 6, "fill {px:?}");
+        }
+        let dark_ink = out.pixels().filter(|p| p.0.iter().all(|&c| c < 60)).count();
+        assert!(dark_ink > 500, "black title pixels: {dark_ink}");
+    }
+
+    #[test]
+    fn push_dark_still_applies_to_flat_dark_and_coloured_images() {
+        let grey = DynamicImage::ImageRgb8(RgbImage::from_pixel(800, 500, Rgb([60, 60, 60])));
+        let fill = fill_from_image(&grey);
+        assert!(relative_luminance(fill) <= 0.10);
+        assert_eq!(text_ink(fill), [255, 255, 255]);
+
+        let coloured = DynamicImage::ImageRgb8(RgbImage::from_pixel(800, 500, Rgb([250, 200, 40])));
+        let fill = fill_from_image(&coloured);
+        assert!(relative_luminance(fill) <= 0.10, "{fill:?}");
+        assert_eq!(text_ink(fill), [255, 255, 255]);
+        assert!(contrast(fill, [255, 255, 255]) >= 7.0);
     }
 
     #[test]
