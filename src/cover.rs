@@ -852,8 +852,53 @@ mod tests {
         assert!(lines.len() <= 4, "{}", lines.len());
         assert_eq!(lines.len(), 4);
         assert!(lines[3].ends_with('…'), "{:?}", lines[3]);
-        assert!(size >= 148.0, "{size}");
+        assert_eq!(size, 148.0);
+        assert!(measure(plex(), &lines[3], size) <= 1360.0);
         assert!(size * cap_ratio() >= 102.0, "{}", size * cap_ratio());
+    }
+
+    #[test]
+    fn title_shrinks_by_one_step_to_fit_four_lines() {
+        let title = "n".repeat(60);
+        assert_eq!(wrap_lines(&title, 180.0, 1360.0).len(), 5);
+        assert!(wrap_lines(&title, 172.0, 1360.0).len() <= 4);
+        let (size, lines) = layout_title(&title, 1360.0);
+        assert_eq!(size, 172.0);
+        assert!(lines.len() <= 4, "{}", lines.len());
+        assert!(
+            lines
+                .iter()
+                .all(|line| measure(plex(), line, size) <= 1360.0)
+        );
+    }
+
+    #[test]
+    fn ellipsis_keeps_the_widest_prefix_that_fits() {
+        let font = plex();
+        let size = 148.0;
+        let kept = "n".repeat(8);
+        let exact = measure(font, &format!("{kept}…"), size);
+        let mut line = "n".repeat(40);
+        ellipsize_last(&mut line, size, exact);
+        assert_eq!(line, format!("{kept}…"));
+    }
+
+    #[test]
+    fn combining_marks_stay_on_their_base_and_lines_fit() {
+        let title = "x\u{301}".repeat(120);
+        let (size, lines) = layout_title(&title, 1360.0);
+        let font = plex();
+        assert!(!lines.is_empty());
+        for line in &lines {
+            assert!(!line.starts_with('\u{0301}'), "{line:?}");
+            assert!(measure(font, line, size) <= 1360.0, "{line:?}");
+            let body = line.strip_suffix('…').unwrap_or(line);
+            let mut chars = body.chars();
+            while let Some(ch) = chars.next() {
+                assert_eq!(ch, 'x', "{body:?}");
+                assert_eq!(chars.next(), Some('\u{0301}'), "{body:?}");
+            }
+        }
     }
 
     #[test]
@@ -977,6 +1022,103 @@ mod tests {
         let capped = encode_jpeg_capped(&image);
         assert!(capped.len() <= 500 * 1024, "{}", capped.len());
         assert!(capped.len() < high.len());
+        // Literal cap, not `JPEG_LIMIT`, so a broken constant cannot satisfy itself.
+        let limit = 500 * 1024;
+        let mut expected = None;
+        for quality in [85_u8, 80, 75, 70, 65, 60] {
+            let bytes = if quality == 85 {
+                high.clone()
+            } else {
+                encode_jpeg(&image, quality)
+            };
+            if bytes.len() <= limit {
+                expected = Some(bytes);
+                break;
+            }
+        }
+        assert_eq!(capped, expected.unwrap_or_else(|| encode_jpeg(&image, 55)));
+    }
+
+    #[test]
+    fn flat_jpeg_stays_at_quality_85() {
+        let image = RgbImage::from_pixel(32, 32, Rgb([40, 80, 120]));
+        assert_eq!(encode_jpeg_capped(&image), encode_jpeg(&image, 85));
+    }
+
+    fn histogram_bin(rgb: [u8; 3]) -> usize {
+        (((rgb[0] as usize) >> 4) << 8) | (((rgb[1] as usize) >> 4) << 4) | ((rgb[2] as usize) >> 4)
+    }
+
+    #[test]
+    fn dominant_colour_uses_the_majority_mean_and_the_lower_bin() {
+        let mut image = RgbImage::new(32, 32);
+        for (index, pixel) in image.pixels_mut().enumerate() {
+            *pixel = if index < 717 {
+                Rgb([30, 90, 160])
+            } else {
+                Rgb([200, 40, 40])
+            };
+        }
+        assert_eq!(
+            dominant_colour(&DynamicImage::ImageRgb8(image)),
+            [30, 90, 160]
+        );
+
+        // Equal counts in two bins. `>` keeps the lower index; `>=` would keep the later one.
+        // Each pair collapses to one bin if the matching `<<` in the index is flipped.
+        for (low, high) in [([16, 0, 0], [32, 0, 0]), ([0, 16, 0], [0, 32, 0])] {
+            assert!(
+                histogram_bin(low) < histogram_bin(high),
+                "{low:?} vs {high:?}"
+            );
+            let mut tie = RgbImage::new(32, 32);
+            for (index, pixel) in tie.pixels_mut().enumerate() {
+                *pixel = if index < 512 { Rgb(low) } else { Rgb(high) };
+            }
+            assert_eq!(dominant_colour(&DynamicImage::ImageRgb8(tie)), low);
+        }
+    }
+
+    #[test]
+    fn centre_crop_keeps_the_middle_band_and_the_composite_band_binds() {
+        let tall = RgbImage::from_fn(1000, 2000, |_x, y| {
+            Rgb([(y >> 8) as u8, (y & 255) as u8, 7])
+        });
+        let cropped = centre_crop_16(&tall);
+        let crop_h = 1000 * 8 / 5;
+        let y0 = (2000 - crop_h) / 2;
+        assert_eq!((cropped.width(), cropped.height()), (1000, crop_h));
+        for frac in [1_u32, 3] {
+            let y = crop_h * frac / 4;
+            assert_eq!(cropped.get_pixel(10, y), tall.get_pixel(10, y0 + y));
+        }
+        assert_eq!(cropped.get_pixel(0, 0), tall.get_pixel(0, y0));
+        assert_ne!(*cropped.get_pixel(0, 0), *tall.get_pixel(0, 0));
+        assert_ne!(
+            *cropped.get_pixel(0, crop_h - 1),
+            *tall.get_pixel(0, tall.height() - 1)
+        );
+
+        let wide = RgbImage::from_fn(1000, 1400, |x, y| {
+            Rgb([(x >> 8) as u8, (x & 255) as u8, (y & 255) as u8])
+        });
+        let cropped = centre_crop_16(&wide);
+        let crop_w = 1400 * 5 / 8;
+        let x0 = (1000 - crop_w) / 2;
+        assert_eq!((cropped.width(), cropped.height()), (crop_w, 1400));
+        for frac in [1_u32, 3] {
+            let y = 1400 * frac / 4;
+            let x = crop_w * frac / 4;
+            assert_eq!(cropped.get_pixel(x, y), wide.get_pixel(x0 + x, y));
+        }
+        assert_eq!(cropped.get_pixel(0, 700), wide.get_pixel(x0, 700));
+        assert_ne!(*cropped.get_pixel(0, 0), *wide.get_pixel(0, 0));
+        assert_ne!(
+            *cropped.get_pixel(crop_w - 1, 0),
+            *wide.get_pixel(wide.width() - 1, 0)
+        );
+
+        assert_eq!(composite_box(800, 1000).3, 1408);
     }
 
     #[test]
