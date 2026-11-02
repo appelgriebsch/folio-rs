@@ -40,7 +40,7 @@ pub fn slug_from_title(title: &str) -> Option<String> {
         }
         out.push(ch);
     }
-    let out = out.trim_end_matches(|c| c == '-' || c == '.').to_string();
+    let out = out.trim_end_matches(['-', '.']).to_string();
     if out.is_empty() || out.starts_with('.') || DEVICE_NAMES.contains(&out.as_str()) {
         None
     } else {

@@ -105,12 +105,11 @@ pub fn prescan_charset(input: &[u8]) -> Option<&'static Encoding> {
                     .split_whitespace()
                     .any(|token| token == "content-type")
         });
-        if content_type {
-            if let Some((_, content)) = attrs.iter().find(|(name, _)| name == "content") {
-                if let Some(encoding) = charset_from_content_type(content) {
-                    return Some(encoding);
-                }
-            }
+        if content_type
+            && let Some((_, content)) = attrs.iter().find(|(name, _)| name == "content")
+            && let Some(encoding) = charset_from_content_type(content)
+        {
+            return Some(encoding);
         }
     }
     None

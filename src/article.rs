@@ -9,9 +9,11 @@ pub struct ArticleHtml {
 
 pub fn extract_article(html: &str, base: &url::Url, page_url: &str) -> Result<ArticleHtml, Error> {
     let html = prepare_for_reader(html);
-    let mut config = Config::default();
     // Short articles are still articles. The default threshold is sized for a full page score.
-    config.char_threshold = 20;
+    let config = Config {
+        char_threshold: 20,
+        ..Config::default()
+    };
     let mut readability = Readability::new(html.as_str(), Some(base.as_str()), Some(config))
         .map_err(|err| map_readability(err, page_url))?;
     let article = readability
@@ -246,9 +248,11 @@ mod tests {
     #[test]
     fn too_many_elements_is_not_a_fetch_failure() {
         let html = "<html><body><article><p>One sentence of article text.</p><p>More.</p></article></body></html>";
-        let mut config = Config::default();
-        config.char_threshold = 20;
-        config.max_elements_to_parse = 1;
+        let config = Config {
+            char_threshold: 20,
+            max_elements_to_parse: 1,
+            ..Config::default()
+        };
         let base = url::Url::parse("http://example.test/a").unwrap();
         let mut readability = Readability::new(html, Some(base.as_str()), Some(config)).unwrap();
         let err = readability.parse().unwrap_err();
