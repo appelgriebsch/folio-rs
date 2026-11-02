@@ -172,10 +172,10 @@ fn flatten_picture(picture: &NodeRef<'_>, base: &Url) {
         .copied()
         .collect();
     let mut chosen = Vec::new();
-    if let Some(img) = img {
-        if has_real_src_or_srcset(&img, base) {
-            chosen = candidates_for(&img, base);
-        }
+    if let Some(img) = img
+        && has_real_src_or_srcset(&img, base)
+    {
+        chosen = candidates_for(&img, base);
     }
     if chosen.is_empty() {
         for source in &sources {
@@ -190,10 +190,10 @@ fn flatten_picture(picture: &NodeRef<'_>, base: &Url) {
             }
         }
     }
-    if chosen.is_empty() {
-        if let Some(img) = img {
-            chosen = candidates_for(&img, base);
-        }
+    if chosen.is_empty()
+        && let Some(img) = img
+    {
+        chosen = candidates_for(&img, base);
     }
     for source in &sources {
         source.remove_from_parent();
@@ -245,29 +245,27 @@ fn candidates_for(node: &NodeRef<'_>, base: &Url) -> Vec<Url> {
     if let Some(srcset) = usable_srcset(node) {
         let mut urls = Vec::new();
         for candidate in srcset {
-            if let Some(url) = resolve(base, &candidate.url) {
-                if !urls.iter().any(|have: &Url| have == &url) {
-                    urls.push(url);
-                }
+            if let Some(url) = resolve(base, &candidate.url)
+                && !urls.iter().any(|have: &Url| have == &url)
+            {
+                urls.push(url);
             }
         }
         if !urls.is_empty() {
             return urls;
         }
     }
-    if let Some(raw) = attr(node, "src") {
-        if let Some(url) = resolve(base, &raw) {
-            if src_is_real(&url, dims_one) {
-                return vec![url];
-            }
-        }
+    if let Some(raw) = attr(node, "src")
+        && let Some(url) = resolve(base, &raw)
+        && src_is_real(&url, dims_one)
+    {
+        return vec![url];
     }
-    if let Some(raw) = attr(node, "data-src") {
-        if let Some(url) = resolve(base, &raw) {
-            if data_src_usable(&url) {
-                return vec![url];
-            }
-        }
+    if let Some(raw) = attr(node, "data-src")
+        && let Some(url) = resolve(base, &raw)
+        && data_src_usable(&url)
+    {
+        return vec![url];
     }
     Vec::new()
 }
@@ -285,7 +283,7 @@ fn usable_srcset(node: &NodeRef<'_>) -> Option<Vec<SrcCandidate>> {
     }
     let mut parsed = parsed;
     if has_width {
-        parsed.sort_by(|a, b| b.width.unwrap_or(0).cmp(&a.width.unwrap_or(0)));
+        parsed.sort_by_key(|item| std::cmp::Reverse(item.width.unwrap_or(0)));
     } else {
         parsed.sort_by(|a, b| {
             b.density
@@ -344,14 +342,14 @@ fn parse_srcset(input: &str) -> Vec<SrcCandidate> {
                 i += 1;
             }
             let desc = &input[desc_start..i];
-            if let Some(value) = strip_suffix_ignore_ascii(desc, 'w') {
-                if let Ok(number) = value.parse::<u32>() {
-                    width = Some(number);
-                }
-            } else if let Some(value) = strip_suffix_ignore_ascii(desc, 'x') {
-                if let Ok(number) = value.parse::<f32>() {
-                    density = Some(number);
-                }
+            if let Some(value) = strip_suffix_ignore_ascii(desc, 'w')
+                && let Ok(number) = value.parse::<u32>()
+            {
+                width = Some(number);
+            } else if let Some(value) = strip_suffix_ignore_ascii(desc, 'x')
+                && let Ok(number) = value.parse::<f32>()
+            {
+                density = Some(number);
             }
         }
         if !url.is_empty() {
@@ -464,17 +462,12 @@ fn inside_picture(node: &NodeRef<'_>) -> bool {
         .any(|ancestor| name_is(ancestor, "picture"))
 }
 
-/// Fetch one http(s) or data image for the EPUB cover. The href is `images/cover.{ext}`.
-pub fn download_cover(client: &Client, url: &str) -> Option<EmbeddedImage> {
-    let mut image = fetch_image(client, url, 1).ok()?;
-    let extension = image
-        .href
-        .rsplit('.')
-        .next()
-        .filter(|ext| !ext.is_empty())
-        .unwrap_or("img");
-    image.href = format!("images/cover.{extension}");
-    Some(image)
+/// Fetch one http(s) or data image and decode it for the cover.
+/// Unusable: fetch error, SVG, AVIF, undecodable bytes, or width under 400 px.
+/// GIF contributes its first frame. WebP is decoded.
+pub fn download_cover(client: &Client, url: &str) -> Option<image::DynamicImage> {
+    let (mime, bytes) = load_image_bytes(client, url).ok()?;
+    decode_cover(&bytes, mime.as_deref())
 }
 
 pub fn download_images(
@@ -533,37 +526,62 @@ fn first_embedded(
 }
 
 fn fetch_image(client: &Client, url: &str, index: usize) -> Result<EmbeddedImage, ()> {
-    let (mime, bytes) = if url.starts_with("data:") {
-        decode_data_url(url).ok_or(())?
-    } else {
-        let parsed = Url::parse(url).map_err(|_| ())?;
-        if parsed.scheme() != "http" && parsed.scheme() != "https" {
-            return Err(());
-        }
-        let response = client.get(parsed).send().map_err(|_| ())?;
-        if !response.status().is_success() {
-            return Err(());
-        }
-        if response
-            .content_length()
-            .is_some_and(|len| len > MAX_IMAGE_BYTES as u64)
-        {
-            return Err(());
-        }
-        let mime = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.split(';').next().unwrap_or("").trim().to_string());
-        let bytes = read_capped(response, MAX_IMAGE_BYTES)?;
-        (mime, bytes)
-    };
+    let (mime, bytes) = load_image_bytes(client, url)?;
     let accepted = accept_image(&bytes, mime.as_deref()).ok_or(())?;
     Ok(EmbeddedImage {
         href: format!("images/img-{index}.{}", accepted.extension),
         bytes: accepted.bytes,
         media_type: accepted.media_type,
     })
+}
+
+fn load_image_bytes(client: &Client, url: &str) -> Result<(Option<String>, Vec<u8>), ()> {
+    if url.starts_with("data:") {
+        return decode_data_url(url).ok_or(());
+    }
+    let parsed = Url::parse(url).map_err(|_| ())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(());
+    }
+    let response = client.get(parsed).send().map_err(|_| ())?;
+    if !response.status().is_success() {
+        return Err(());
+    }
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_IMAGE_BYTES as u64)
+    {
+        return Err(());
+    }
+    let mime = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(';').next().unwrap_or("").trim().to_string());
+    let bytes = read_capped(response, MAX_IMAGE_BYTES)?;
+    Ok((mime, bytes))
+}
+
+fn decode_cover(bytes: &[u8], content_type: Option<&str>) -> Option<image::DynamicImage> {
+    let hinted = content_type
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if hinted.eq_ignore_ascii_case("image/svg+xml") || looks_like_svg(bytes) {
+        return None;
+    }
+    if hinted.eq_ignore_ascii_case("image/avif")
+        || matches!(image::guess_format(bytes), Ok(ImageFormat::Avif))
+    {
+        return None;
+    }
+    let image = decode_limited(bytes).ok()?;
+    if image.width() < 400 {
+        return None;
+    }
+    Some(image)
 }
 
 struct Accepted {
@@ -882,14 +900,14 @@ fn percent_decode(input: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(value) =
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(value) =
                 u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
-            {
-                out.push(value);
-                i += 3;
-                continue;
-            }
+        {
+            out.push(value);
+            i += 3;
+            continue;
         }
         if bytes[i] == b'+' {
             out.push(b' ');
@@ -1058,6 +1076,38 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].width, Some(100));
         assert_eq!(parsed[1].density, Some(2.0));
+    }
+
+    #[test]
+    fn cover_uses_the_gif_first_frame_and_rejects_svg_avif_and_narrow() {
+        let first = image::RgbaImage::from_pixel(400, 200, image::Rgba([255, 0, 0, 255]));
+        let second = image::RgbaImage::from_pixel(400, 200, image::Rgba([0, 0, 255, 255]));
+        let mut gif = Vec::new();
+        image::codecs::gif::GifEncoder::new(&mut gif)
+            .encode_frames([image::Frame::new(first), image::Frame::new(second)])
+            .unwrap();
+        let decoded = super::decode_cover(&gif, Some("image/gif")).expect("gif");
+        let pixel = decoded.to_rgba8().get_pixel(8, 8).0;
+        assert!(pixel[0] > 200 && pixel[2] < 40, "{pixel:?}");
+
+        let webp_src = image::RgbImage::from_pixel(400, 200, image::Rgb([0, 180, 0]));
+        let mut webp = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut webp)
+            .encode(webp_src.as_raw(), 400, 200, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let decoded = super::decode_cover(&webp, Some("image/webp")).expect("webp");
+        assert_eq!((decoded.width(), decoded.height()), (400, 200));
+
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600"></svg>"#;
+        assert!(super::decode_cover(svg, Some("image/svg+xml")).is_none());
+        assert!(super::decode_cover(svg, None).is_none());
+
+        let avif = b"\0\0\0\x18ftypavif";
+        assert!(super::decode_cover(avif, None).is_none());
+        let png = tiny_png(400, 200);
+        assert!(super::decode_cover(&png, Some("image/avif")).is_none());
+        assert!(super::decode_cover(&tiny_png(399, 200), Some("image/png")).is_none());
+        assert!(super::decode_cover(&png, Some("image/png")).is_some());
     }
 
     fn tiny_png(width: u32, height: u32) -> Vec<u8> {
