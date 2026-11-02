@@ -50,7 +50,7 @@ Images in the article are embedded when they are JPEG, PNG, or GIF, within the s
 
 The table of contents has two levels. A single title heading is the chapter, and the entries under it are `h2` sections with `h3` subsections. When the page has several `h1` headings, those are the first level and `h2` headings are the second.
 
-The cover is the page's share image, in this order: `og:image`, then `twitter:image`, then the article's JSON-LD image. If that file cannot be fetched, the EPUB is still written and the image is omitted with a warning.
+The cover is always a portrait JPEG (`images/cover.jpg`, with `cover.xhtml` first in the spine). Folio tries up to three share images, the typed page's banner first, in this order: `og:image`, then `twitter:image`, then the article's JSON-LD image. A usable image is JPEG, PNG, GIF, or WebP and at least 400 px wide. If none can be used, the cover is typographic: the title in IBM Plex Serif on a dark colour chosen from the host name. A title the font cannot draw, or that needs shaping (Arabic, Hebrew, Thai, and similar scripts), is replaced by the site name. Each image that cannot be used is omitted with a warning, and the EPUB is still written.
 
 ## License
 
