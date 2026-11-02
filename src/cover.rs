@@ -885,6 +885,10 @@ mod tests {
 
     #[test]
     fn combining_marks_stay_on_their_base_and_lines_fit() {
+        assert_eq!(
+            clusters("x\u{301}yz\u{308}"),
+            vec!["x\u{301}", "y", "z\u{308}"]
+        );
         let title = "x\u{301}".repeat(120);
         let (size, lines) = layout_title(&title, 1360.0);
         let font = plex();
@@ -1066,7 +1070,11 @@ mod tests {
 
         // Equal counts in two bins. `>` keeps the lower index; `>=` would keep the later one.
         // Each pair collapses to one bin if the matching `<<` in the index is flipped.
-        for (low, high) in [([16, 0, 0], [32, 0, 0]), ([0, 16, 0], [0, 32, 0])] {
+        for (low, high) in [
+            ([16, 0, 0], [32, 0, 0]),
+            ([0, 16, 0], [0, 32, 0]),
+            ([0, 0, 16], [0, 0, 32]),
+        ] {
             assert!(
                 histogram_bin(low) < histogram_bin(high),
                 "{low:?} vs {high:?}"
@@ -1077,6 +1085,26 @@ mod tests {
             }
             assert_eq!(dominant_colour(&DynamicImage::ImageRgb8(tie)), low);
         }
+
+        // 512×30 + 512×31 on R and B, 512×32 + 512×33 on G, one bin.
+        // Half-up is [31, 33, 31]. G stays out of nibble 1 so a blue `<< 4`
+        // cannot OR the two colours back together.
+        let mut mixed = RgbImage::new(32, 32);
+        for (index, pixel) in mixed.pixels_mut().enumerate() {
+            *pixel = if index < 512 {
+                Rgb([30, 32, 30])
+            } else {
+                Rgb([31, 33, 31])
+            };
+        }
+        let scaled = DynamicImage::ImageRgb8(mixed.clone())
+            .resize_exact(32, 32, FilterType::Triangle)
+            .to_rgb8();
+        assert_eq!(scaled, mixed);
+        assert_eq!(
+            dominant_colour(&DynamicImage::ImageRgb8(mixed)),
+            [31, 33, 31]
+        );
     }
 
     #[test]
@@ -1167,15 +1195,39 @@ mod tests {
     }
 
     #[test]
+    fn composite_title_shrinks_through_the_vertical_budget() {
+        // 36 n's stay 3 lines from 180 to 156. dh 1408 leaves avail 552.8:
+        // 621, 593, 566, then 538, so the size stops at 156.
+        let title = "n".repeat(36);
+        assert_eq!(wrap_lines(&title, 180.0, 1360.0).len(), 3);
+        let layout = composite_layout(800, 1000, &title);
+        assert_eq!(layout.dh, 1408);
+        assert_eq!((layout.size, layout.lines.len()), (156.0, 3));
+        // dh 1400 leaves avail 560.8, still under 3×164×1.15 = 565.8.
+        // Putting the 4 px rule back (`-` → `+`) would keep 164.
+        let tight = composite_layout(900, 933, &title);
+        assert_eq!((tight.dh, tight.size, tight.lines.len()), (1400, 156.0, 3));
+    }
+
+    #[test]
     fn long_composite_title_stays_above_the_footer() {
-        let title = "n".repeat(72);
+        let title = "gypq".repeat(24);
         assert!(
             wrap_lines(&title, 180.0, 1360.0).len() >= 4,
             "fixture should be four lines at 180 px"
         );
+        assert_eq!(composite_box(3200, 1000), (0, 307, 1600, 500));
         for (width, height) in [(900u32, 900u32), (800, 1000)] {
             let layout = composite_layout(width, height, &title);
             let block = layout.origin + layout.lines.len() as f32 * layout.size * LINE_HEIGHT;
+            // floor(origin + 3×148×1.15 + 40). round() was 2272 and 2330.
+            assert_eq!(layout.rule_y, if height == 900 { 2271 } else { 2329 });
+            for line in &layout.lines {
+                let width_px = measure(plex(), line, layout.size);
+                assert!(width_px <= 1360.0, "{line} {width_px}");
+                // A collapsed max_width leaves a one-glyph line, well under 1000.
+                assert!(width_px > 1000.0, "{line} {width_px}");
+            }
             assert!(
                 block + 40.0 <= layout.footer_top,
                 "{width}x{height}: title {block} footer {}",
@@ -1199,6 +1251,15 @@ mod tests {
             assert_eq!((cover.width, cover.height), (COVER_W, COVER_H));
             let image = decode(&cover.bytes);
             let fill = fill_from_image(&red(width, height));
+            let ink_bottom = (0..layout.rule_y as u32)
+                .rev()
+                .find(|y| (0..image.width()).any(|x| near_white(image.get_pixel(x, *y))))
+                .expect("title ink");
+            assert!(
+                layout.rule_y as u32 - ink_bottom >= 40,
+                "{width}x{height}: ink {ink_bottom} rule {}",
+                layout.rule_y
+            );
             let gap_start = (layout.rule_y + RULE_PX) as u32;
             let gap_end = layout.footer_top.floor() as u32;
             assert!(gap_start < gap_end, "{gap_start}..{gap_end}");
