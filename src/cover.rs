@@ -263,10 +263,17 @@ fn needs_shaping(ch: char) -> bool {
 }
 
 fn layout_title(title: &str, max_width: f32) -> (f32, Vec<String>) {
+    layout_title_within(title, max_width, f32::MAX)
+}
+
+/// Horizontal wrap, then a vertical budget (`lines × size × 1.15 ≤ avail`).
+/// Shrink 180→148 by 8, then drop lines (ellipsis on a grapheme boundary).
+fn layout_title_within(title: &str, max_width: f32, avail: f32) -> (f32, Vec<String>) {
     let text: String = title.nfc().collect();
     let mut size = TITLE_MAX;
+    let mut lines;
     loop {
-        let mut lines = wrap_lines(&text, size, max_width);
+        lines = wrap_lines(&text, size, max_width);
         if lines.len() > MAX_LINES {
             if size > TITLE_MIN {
                 size -= TITLE_STEP;
@@ -275,8 +282,17 @@ fn layout_title(title: &str, max_width: f32) -> (f32, Vec<String>) {
             lines.truncate(MAX_LINES);
             ellipsize_last(&mut lines[MAX_LINES - 1], size, max_width);
         }
-        return (size, lines);
+        if lines.len() as f32 * size * LINE_HEIGHT <= avail || size <= TITLE_MIN {
+            break;
+        }
+        size -= TITLE_STEP;
     }
+    while lines.len() as f32 * size * LINE_HEIGHT > avail && lines.len() > 1 {
+        lines.pop();
+        let last = lines.len() - 1;
+        ellipsize_last(&mut lines[last], size, max_width);
+    }
+    (size, lines)
 }
 
 fn wrap_lines(text: &str, size: f32, max_width: f32) -> Vec<String> {
@@ -416,6 +432,18 @@ fn measure(font: &FontRef<'_>, text: &str, size: f32) -> f32 {
     width
 }
 
+struct CompositeLayout {
+    left: u32,
+    top: u32,
+    dw: u32,
+    dh: u32,
+    origin: f32,
+    size: f32,
+    lines: Vec<String>,
+    rule_y: i32,
+    footer_top: f32,
+}
+
 fn render_composite(
     image: &RgbImage,
     title: &str,
@@ -424,15 +452,60 @@ fn render_composite(
     ink: [u8; 3],
 ) -> RgbImage {
     let mut canvas = RgbImage::from_pixel(COVER_W, COVER_H, Rgb(fill));
-    let (left, top, dw, dh) = composite_box(image.width(), image.height());
-    let resized = imageops::resize(image, dw, dh, FilterType::CatmullRom);
-    imageops::overlay(&mut canvas, &resized, i64::from(left), i64::from(top));
-    let (size, lines) = layout_title(title, COVER_W as f32 - MARGIN * 2.0);
-    let origin = top as f32 + dh as f32 + 64.0;
-    let bottom = paint_text_block(&mut canvas, &lines, size, origin, ink);
-    paint_rule(&mut canvas, (bottom + 40.0).round() as i32, ink);
+    let layout = composite_layout(image.width(), image.height(), title);
+    let resized = imageops::resize(image, layout.dw, layout.dh, FilterType::CatmullRom);
+    imageops::overlay(
+        &mut canvas,
+        &resized,
+        i64::from(layout.left),
+        i64::from(layout.top),
+    );
+    paint_text_block(&mut canvas, &layout.lines, layout.size, layout.origin, ink);
+    debug_assert!((layout.rule_y + RULE_PX) as f32 <= layout.footer_top);
+    paint_rule(&mut canvas, layout.rule_y, ink);
     paint_footer(&mut canvas, site, ink);
     canvas
+}
+
+fn footer_top() -> f32 {
+    let baseline = COVER_H as f32 - FOOTER_FROM_BOTTOM;
+    baseline - plex().as_scaled(PxScale::from(FOOTER_PX)).ascent()
+}
+
+fn composite_layout(width: u32, height: u32, title: &str) -> CompositeLayout {
+    let max_width = COVER_W as f32 - MARGIN * 2.0;
+    let foot = footer_top();
+    let (mut left, top, mut dw, mut dh) = composite_box(width, height);
+    let mut origin = top as f32 + dh as f32 + 64.0;
+    // Title block must end before the 40 px gap, the rule, and the footer.
+    let mut avail = foot - 40.0 - RULE_PX as f32 - origin;
+    let (mut size, mut lines) = layout_title_within(title, max_width, avail);
+    let mut block = lines.len() as f32 * size * LINE_HEIGHT;
+    if block > avail {
+        // One line at 148 px still does not fit: shorten the band, keep the 12 % top.
+        let max_dh = (foot - 40.0 - RULE_PX as f32 - TITLE_MIN * LINE_HEIGHT - 64.0 - top as f32)
+            .floor()
+            .max(1.0) as u32;
+        dh = max_dh.min(dh.saturating_sub(1)).max(1);
+        let scale = f64::from(dh) / f64::from(height);
+        dw = (f64::from(width) * scale).round().max(1.0) as u32;
+        left = COVER_W.saturating_sub(dw) / 2;
+        origin = top as f32 + dh as f32 + 64.0;
+        avail = foot - 40.0 - RULE_PX as f32 - origin;
+        (size, lines) = layout_title_within(title, max_width, avail);
+        block = lines.len() as f32 * size * LINE_HEIGHT;
+    }
+    CompositeLayout {
+        left,
+        top,
+        dw,
+        dh,
+        origin,
+        size,
+        lines,
+        rule_y: (origin + block + 40.0).round() as i32,
+        footer_top: foot,
+    }
 }
 
 fn composite_box(width: u32, height: u32) -> (u32, u32, u32, u32) {
@@ -919,6 +992,69 @@ mod tests {
         let image = decode(&cover.bytes);
         let top = image_top();
         assert!(bright_red(image.get_pixel(800, top + 20)));
+    }
+
+    fn gap_is_fill(image: &RgbImage, fill: [u8; 3], y0: u32, y1: u32) -> bool {
+        (y0..y1).all(|y| {
+            (0..image.width()).all(|x| {
+                image
+                    .get_pixel(x, y)
+                    .0
+                    .iter()
+                    .zip(fill)
+                    .all(|(got, want)| got.abs_diff(want) <= 12)
+            })
+        })
+    }
+
+    #[test]
+    fn long_composite_title_stays_above_the_footer() {
+        let title = "n".repeat(72);
+        assert!(
+            wrap_lines(&title, 180.0, 1360.0).len() >= 4,
+            "fixture should be four lines at 180 px"
+        );
+        for (width, height) in [(900u32, 900u32), (800, 1000)] {
+            let layout = composite_layout(width, height, &title);
+            let block = layout.origin + layout.lines.len() as f32 * layout.size * LINE_HEIGHT;
+            assert!(
+                block + 40.0 <= layout.footer_top,
+                "{width}x{height}: title {block} footer {}",
+                layout.footer_top
+            );
+            assert!(layout.rule_y >= 0, "{}", layout.rule_y);
+            assert!(
+                layout.rule_y + RULE_PX <= COVER_H as i32
+                    && (layout.rule_y + RULE_PX) as f32 <= layout.footer_top,
+                "rule {} footer {} canvas {COVER_H}",
+                layout.rule_y,
+                layout.footer_top
+            );
+            assert!(block <= COVER_H as f32);
+            assert_eq!(
+                (layout.left, layout.top, layout.dw, layout.dh),
+                composite_box(width, height),
+                "default scale still fits"
+            );
+            let cover = make_cover(Some(red(width, height)), &title, "example.com");
+            assert_eq!((cover.width, cover.height), (COVER_W, COVER_H));
+            let image = decode(&cover.bytes);
+            let fill = fill_from_image(&red(width, height));
+            let gap_start = (layout.rule_y + RULE_PX) as u32;
+            let gap_end = layout.footer_top.floor() as u32;
+            assert!(gap_start < gap_end, "{gap_start}..{gap_end}");
+            assert!(
+                gap_is_fill(&image, fill, gap_start, gap_end),
+                "{width}x{height}: ink between the rule and the footer"
+            );
+            let rule_whites = (0..image.width())
+                .filter(|x| near_white(image.get_pixel(*x, layout.rule_y as u32)))
+                .count();
+            assert!(rule_whites >= 300, "rule row {}", layout.rule_y);
+            let footer_ink = ((gap_end)..image.height())
+                .any(|y| (0..image.width()).any(|x| near_white(image.get_pixel(x, y))));
+            assert!(footer_ink, "footer site name missing");
+        }
     }
 
     #[test]
