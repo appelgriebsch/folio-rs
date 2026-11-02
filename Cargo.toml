@@ -18,11 +18,23 @@ ctrlc = "3"
 dom_query = "0.27"
 dom_smoothie = "0.18"
 encoding_rs = "0.8"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
+ab_glyph = "0.2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 rbook = "0.7"
 serde_json = "1"
 thiserror = "2"
+unicode-linebreak = "0.1"
 unicode-normalization = "0.1"
 url = "2"
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# Raster, resize, and JPEG dominate cover tests. Optimise those crates in dev.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+[profile.dev.package.ab_glyph_rasterizer]
+opt-level = 3
