@@ -106,6 +106,13 @@ fn read_capped(mut reader: impl Read, max: usize) -> Result<Vec<u8>, std::io::Er
     }
 }
 
+fn fetch_err(url: &Url, err: reqwest::Error) -> Error {
+    Error::Fetch {
+        url: url.to_string(),
+        reason: err.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::read_capped;
@@ -126,12 +133,5 @@ mod tests {
 
         let err = read_capped(std::io::Cursor::new(vec![1u8, 2, 3, 4]), 3).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::FileTooLarge);
-    }
-}
-
-fn fetch_err(url: &Url, err: reqwest::Error) -> Error {
-    Error::Fetch {
-        url: url.to_string(),
-        reason: err.to_string(),
     }
 }

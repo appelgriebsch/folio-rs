@@ -10,6 +10,14 @@ use std::time::Duration;
 use image::ImageEncoder;
 use rbook::Epub;
 
+struct Assets {
+    png: Vec<u8>,
+    red: Vec<u8>,
+    blue: Vec<u8>,
+    green: Vec<u8>,
+    svg: Vec<u8>,
+}
+
 struct Server {
     base: String,
     html_hits: Arc<AtomicUsize>,
@@ -20,7 +28,13 @@ struct Server {
 
 impl Server {
     fn start() -> Self {
-        let png = tiny_png();
+        let assets = Assets {
+            png: tiny_png(),
+            red: solid_png(1200, 630, [230, 20, 20]),
+            blue: solid_png(1200, 630, [20, 20, 230]),
+            green: solid_png(500, 400, [20, 180, 20]),
+            svg: br#"<svg xmlns="http://www.w3.org/2000/svg" width="800" height="400"><rect width="800" height="400" fill="red"/></svg>"#.to_vec(),
+        };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let html_hits = Arc::new(AtomicUsize::new(0));
@@ -29,11 +43,17 @@ impl Server {
         let html_hits_t = Arc::clone(&html_hits);
         let image_hits_t = Arc::clone(&image_hits);
         let miss_hits_t = Arc::clone(&miss_hits);
-        let png_t = png.clone();
+        let assets_t = Assets {
+            png: assets.png.clone(),
+            red: assets.red.clone(),
+            blue: assets.blue.clone(),
+            green: assets.green.clone(),
+            svg: assets.svg.clone(),
+        };
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let _ = handle(stream, &html_hits_t, &image_hits_t, &miss_hits_t, &png_t);
+                let _ = handle(stream, &html_hits_t, &image_hits_t, &miss_hits_t, &assets_t);
             }
         });
         Self {
@@ -41,7 +61,7 @@ impl Server {
             html_hits,
             image_hits,
             miss_hits,
-            png,
+            png: assets.png,
         }
     }
 }
@@ -51,7 +71,7 @@ fn handle(
     html_hits: &AtomicUsize,
     image_hits: &AtomicUsize,
     miss_hits: &AtomicUsize,
-    png: &[u8],
+    assets: &Assets,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut buf = [0u8; 2048];
@@ -70,7 +90,13 @@ fn handle(
     let body = match path {
         "/photo.png" => {
             image_hits.fetch_add(1, Ordering::SeqCst);
-            return respond(&mut stream, "200 OK", "image/png", png);
+            return respond(&mut stream, "200 OK", "image/png", &assets.png);
+        }
+        "/red.png" => return respond(&mut stream, "200 OK", "image/png", &assets.red),
+        "/blue.png" => return respond(&mut stream, "200 OK", "image/png", &assets.blue),
+        "/green.png" => return respond(&mut stream, "200 OK", "image/png", &assets.green),
+        "/cover.svg" => {
+            return respond(&mut stream, "200 OK", "image/svg+xml", &assets.svg);
         }
         "/article" => {
             html_hits.fetch_add(1, Ordering::SeqCst);
@@ -112,7 +138,6 @@ fn handle(
                 "de",
                 r#"<link rel="reader" href="/reader-doc">"#,
                 "",
-                false,
             )
         }
         "/reader-doc" => {
@@ -123,9 +148,11 @@ fn handle(
                 "READER_PAGE_MARKER",
                 "reader-canonical",
                 "en",
-                "",
+                r#"<script type="application/ld+json">
+              {"@type":"NewsArticle","headline":"Reader Headline","datePublished":"2020-02-03",
+               "author":{"@type":"Person","name":"Grace Hopper"},"description":"From the reader"}
+            </script>"#,
                 r#"<p><a rel="reader" href="/second-hop">Elsewhere</a></p>"#,
-                true,
             )
         }
         "/second-hop" => {
@@ -138,7 +165,6 @@ fn handle(
                 "en",
                 "",
                 "",
-                false,
             )
         }
         "/several-readers" => {
@@ -151,7 +177,6 @@ fn handle(
                 "de",
                 r#"<link rel="reader" href="/reader-a"><link rel="readmode" href="/reader-b">"#,
                 "",
-                false,
             )
         }
         "/reader-miss" => {
@@ -164,7 +189,6 @@ fn handle(
                 "de",
                 r#"<link rel="reader" href="/missing-reader">"#,
                 "",
-                false,
             )
         }
         "/reader-empty" => {
@@ -177,7 +201,68 @@ fn handle(
                 "de",
                 r#"<link rel="reader" href="/empty-reader">"#,
                 "",
-                false,
+            )
+        }
+        "/plain" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            story("Plain Story", "PLAIN_MARKER", "")
+        }
+        "/second-cover" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            let host = host_of(&req);
+            story(
+                "Second Cover",
+                "SECOND_COVER_MARKER",
+                &format!(
+                    r#"<meta property="og:image" content="http://{host}/missing-banner.png">
+                       <meta name="twitter:image" content="http://{host}/red.png">"#
+                ),
+            )
+        }
+        "/dead-covers" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            let host = host_of(&req);
+            story(
+                "Dead Covers",
+                "DEAD_COVER_MARKER",
+                &format!(
+                    r#"<meta property="og:image" content="http://{host}/missing-a.png">
+                       <meta name="twitter:image" content="http://{host}/missing-b.png">"#
+                ),
+            )
+        }
+        "/third-cover" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            let host = host_of(&req);
+            story(
+                "Third Cover",
+                "THIRD_COVER_MARKER",
+                &format!(
+                    r#"<meta property="og:image" content="http://{host}/missing-a.png">
+                       <meta name="twitter:image" content="http://{host}/cover.svg">
+                       <script type="application/ld+json">{{"@type":"NewsArticle","headline":"Third Cover","image":"http://{host}/green.png"}}</script>"#
+                ),
+            )
+        }
+        "/banner-typed" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            let host = host_of(&req);
+            story(
+                "Typed Banner",
+                "TYPED_BANNER_MARKER",
+                &format!(
+                    r#"<link rel="reader" href="/banner-reader">
+                       <meta property="og:image" content="http://{host}/red.png">"#
+                ),
+            )
+        }
+        "/banner-reader" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            let host = host_of(&req);
+            story(
+                "Reader Banner",
+                "READER_BANNER_MARKER",
+                &format!(r#"<meta property="og:image" content="http://{host}/blue.png">"#),
             )
         }
         _ => {
@@ -229,6 +314,11 @@ fn article_html(host: &str, title: &str, rev: &str, with_date: bool) -> String {
     } else {
         title.to_string()
     };
+    let image = if with_date {
+        format!(r#"<meta property="og:image" content="http://{host}/photo.png">"#)
+    } else {
+        String::new()
+    };
     format!(
         r#"<!DOCTYPE html>
         <html lang="de">
@@ -239,7 +329,7 @@ fn article_html(host: &str, title: &str, rev: &str, with_date: bool) -> String {
           {date}
           <link rel="canonical" href="http://{host}/canonical-article">
           <meta property="og:description" content="og description">
-          <meta property="og:image" content="http://{host}/photo.png">
+          {image}
         </head>
         <body>
           <article>
@@ -267,16 +357,7 @@ fn reader_fixture(
     lang: &str,
     extra_head: &str,
     extra_body: &str,
-    with_reader_meta: bool,
 ) -> String {
-    let meta = if with_reader_meta {
-        r#"<script type="application/ld+json">
-              {"@type":"NewsArticle","headline":"Reader Headline","datePublished":"2020-02-03",
-               "author":{"@type":"Person","name":"Grace Hopper"},"description":"From the reader"}
-            </script>"#
-    } else {
-        ""
-    };
     format!(
         r#"<!DOCTYPE html>
         <html lang="{lang}">
@@ -284,7 +365,6 @@ fn reader_fixture(
           <meta charset="utf-8">
           <title>{title}</title>
           <link rel="canonical" href="http://{host}/{canonical}">
-          {meta}
           {extra_head}
         </head>
         <body>
@@ -329,19 +409,54 @@ fn percent_decode(input: &str) -> String {
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(value) =
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(value) =
                 u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
-            {
-                out.push(value);
-                i += 3;
-                continue;
-            }
+        {
+            out.push(value);
+            i += 3;
+            continue;
         }
         out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn story(title: &str, marker: &str, head: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <title>Site title should lose</title>
+          <meta property="og:title" content="{title}">
+          {head}
+        </head>
+        <body>
+          <article>
+            <p>{marker}. The quick brown fox reads this folio article about rust, epub export, and fish and chips. It keeps going so the extractor has a real paragraph to score, with commas, and enough words to look like the story itself.</p>
+            <p>Second paragraph of the same article, still about the folio export, with more sentences so readability keeps this node and not the chrome around it.</p>
+            <p>Third paragraph continues the account of how a single page becomes one file, without fetching another page and without running a script.</p>
+          </article>
+        </body>
+        </html>"#
+    )
+}
+
+fn solid_png(width: u32, height: u32, colour: [u8; 3]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let image = image::RgbImage::from_pixel(width, height, image::Rgb(colour));
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(
+            image.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgb8,
+        )
+        .unwrap();
+    bytes
 }
 
 fn tiny_png() -> Vec<u8> {
@@ -419,7 +534,7 @@ fn writes_epub_with_metadata_image_and_without_active_content() {
         out.stderr
     );
     let path = dir.join("article-headline.epub");
-    assert_eq!(out.stdout, format!("./article-headline.epub\n"));
+    assert_eq!(out.stdout, "./article-headline.epub\n");
     assert!(path.is_file());
     let epub = open_epub(&path);
     assert_eq!(epub.metadata().title().unwrap().value(), "Article Headline");
@@ -461,8 +576,9 @@ fn writes_epub_with_metadata_image_and_without_active_content() {
             .any(|bytes| bytes == &server.png)
     );
     assert!(server.image_hits.load(Ordering::SeqCst) >= 1);
-    let cover = epub.manifest().cover_image().expect("banner is the cover");
-    assert_eq!(cover.read_bytes().unwrap(), server.png);
+    assert_cover_page(&epub, 1600, 2560);
+    let cover_bytes = epub.manifest().cover_image().unwrap().read_bytes().unwrap();
+    assert_ne!(cover_bytes, server.png);
     let toc = epub.toc().contents().unwrap();
     let chapter = toc.get(0).unwrap();
     assert_eq!(chapter.label(), "Article Headline");
@@ -502,6 +618,77 @@ fn missing_date_is_silent_and_omitted() {
     assert!(opf.contains("dc:title"), "{opf}");
     assert!(opf.contains("dc:identifier"), "{opf}");
     assert!(opf.contains("dc:language"), "{opf}");
+}
+
+fn assert_cover_page(epub: &Epub, width: u32, height: u32) {
+    let cover = epub.manifest().cover_image().expect("cover image");
+    assert_eq!(cover.media_type(), "image/jpeg");
+    assert!(
+        cover.href().as_str().ends_with("images/cover.jpg"),
+        "{}",
+        cover.href().as_str()
+    );
+    assert!(cover.properties().has_property("cover-image"));
+    let bytes = cover.read_bytes().unwrap();
+    assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
+    assert!(bytes.len() <= 500 * 1024, "{}", bytes.len());
+    let raster = image::load_from_memory(&bytes).unwrap();
+    assert_eq!((raster.width(), raster.height()), (width, height));
+
+    let spine = epub.spine();
+    let first = spine.get(0).unwrap();
+    assert!(first.is_linear());
+    let page = first.manifest_entry().unwrap();
+    assert!(
+        page.href().as_str().ends_with("cover.xhtml"),
+        "{}",
+        page.href().as_str()
+    );
+    assert!(page.properties().has_property("svg"));
+    let xhtml = page.read_str().unwrap();
+    assert!(
+        xhtml.contains(&format!(r#"viewBox="0 0 {width} {height}""#)),
+        "{xhtml}"
+    );
+    assert!(
+        xhtml.contains(&format!(r#"width="{width}" height="{height}""#)),
+        "{xhtml}"
+    );
+    assert!(
+        xhtml.contains(r#"xlink:href="images/cover.jpg""#),
+        "{xhtml}"
+    );
+    let second = spine.get(1).unwrap();
+    assert!(
+        second
+            .manifest_entry()
+            .unwrap()
+            .href()
+            .as_str()
+            .ends_with("chapter.xhtml")
+    );
+
+    let toc = epub.toc().contents().unwrap();
+    assert_ne!(toc.get(0).unwrap().label(), "Cover");
+    let landmarks = epub.toc().landmarks().expect("landmarks");
+    let mark = landmarks.get(0).unwrap();
+    assert_eq!(mark.label(), "Cover");
+    let href = mark.href_raw().unwrap().to_string();
+    assert!(href.contains("cover.xhtml"), "{href}");
+
+    let opf = package_xml(epub);
+    assert!(opf.contains(r#"name="cover""#), "{opf}");
+    assert!(opf.contains("<guide"), "{opf}");
+    assert!(opf.contains(r#"type="cover""#), "{opf}");
+}
+
+fn cover_pixel(epub: &Epub, x: u32, y: u32) -> [u8; 3] {
+    let bytes = epub.manifest().cover_image().unwrap().read_bytes().unwrap();
+    image::load_from_memory(&bytes)
+        .unwrap()
+        .to_rgb8()
+        .get_pixel(x, y)
+        .0
 }
 
 fn package_xml(epub: &Epub) -> String {
@@ -787,6 +974,109 @@ fn failed_reader_fetch_warns_and_uses_the_typed_page() {
         !text.contains("SECRET") && !text.contains("hidden"),
         "{text}"
     );
+}
+
+#[test]
+fn page_without_a_share_image_still_gets_a_typographic_cover() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/plain", server.base);
+    let out = folio(&dir, &["-o", "plain.epub", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert!(!out.stderr.contains("warning:"), "{}", out.stderr);
+    let epub = open_epub(&dir.join("plain.epub"));
+    assert_cover_page(&epub, 1600, 2560);
+    let text = resource_text(&epub);
+    assert!(text.contains("PLAIN_MARKER"), "{text}");
+}
+
+#[test]
+fn first_cover_candidate_404_uses_the_second_and_warns() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/second-cover", server.base);
+    let missing = format!("{}/missing-banner.png", server.base);
+    let out = folio(&dir, &["-o", "second.epub", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert!(
+        out.stderr
+            .contains(&format!("warning: omitted image {missing}")),
+        "{}",
+        out.stderr
+    );
+    let epub = open_epub(&dir.join("second.epub"));
+    assert_cover_page(&epub, 1600, 2560);
+    let top = (2560.0_f64 * 0.12).round() as u32;
+    let pixel = cover_pixel(&epub, 800, top + 20);
+    assert!(
+        pixel[0] > 180 && pixel[1] < 80 && pixel[2] < 80,
+        "{pixel:?}"
+    );
+}
+
+#[test]
+fn failed_cover_candidates_still_write_a_typographic_cover() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/dead-covers", server.base);
+    let out = folio(&dir, &["-o", "dead.epub", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert!(
+        out.stderr.contains(&format!(
+            "warning: omitted image {}/missing-a.png",
+            server.base
+        )),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains(&format!(
+            "warning: omitted image {}/missing-b.png",
+            server.base
+        )),
+        "{}",
+        out.stderr
+    );
+    let epub = open_epub(&dir.join("dead.epub"));
+    assert_cover_page(&epub, 1600, 2560);
+    let text = resource_text(&epub);
+    assert!(text.contains("DEAD_COVER_MARKER"), "{text}");
+}
+
+#[test]
+fn third_cover_candidate_is_used_when_the_first_two_fail() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/third-cover", server.base);
+    let out = folio(&dir, &["-o", "third.epub", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert!(out.stderr.contains("missing-a.png"), "{}", out.stderr);
+    assert!(out.stderr.contains("cover.svg"), "{}", out.stderr);
+    let epub = open_epub(&dir.join("third.epub"));
+    assert_cover_page(&epub, 1600, 2560);
+    let top = (2560.0_f64 * 0.12).round() as u32;
+    let pixel = cover_pixel(&epub, 800, top + 20);
+    assert!(
+        pixel[1] > 140 && pixel[0] < 80 && pixel[2] < 80,
+        "{pixel:?}"
+    );
+}
+
+#[test]
+fn typed_page_banner_is_tried_before_the_reader_page() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/banner-typed", server.base);
+    let out = folio(&dir, &["-o", "banner.epub", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    let epub = open_epub(&dir.join("banner.epub"));
+    assert_eq!(epub.metadata().title().unwrap().value(), "Reader Banner");
+    let text = resource_text(&epub);
+    assert!(text.contains("READER_BANNER_MARKER"), "{text}");
+    assert!(!text.contains("TYPED_BANNER_MARKER"), "{text}");
+    let top = (2560.0_f64 * 0.12).round() as u32;
+    let pixel = cover_pixel(&epub, 800, top + 20);
+    assert!(pixel[0] > 180 && pixel[2] < 80, "{pixel:?}");
 }
 
 #[test]

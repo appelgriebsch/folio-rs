@@ -12,10 +12,10 @@ pub fn install_interrupt_handler() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = ctrlc::set_handler(|| {
-            if let Ok(mut guard) = TEMP_PATH.lock() {
-                if let Some(path) = guard.take() {
-                    let _ = fs::remove_file(path);
-                }
+            if let Ok(mut guard) = TEMP_PATH.lock()
+                && let Some(path) = guard.take()
+            {
+                let _ = fs::remove_file(path);
             }
             std::process::exit(130);
         });
@@ -155,10 +155,10 @@ impl TempFile {
         }
         replace_file(&self.path, final_path).map_err(|err| Error::Write(err.to_string()))?;
         self.keep = true;
-        if let Ok(mut guard) = TEMP_PATH.lock() {
-            if guard.as_ref() == Some(&self.path) {
-                *guard = None;
-            }
+        if let Ok(mut guard) = TEMP_PATH.lock()
+            && guard.as_ref() == Some(&self.path)
+        {
+            *guard = None;
         }
         Ok(())
     }
@@ -169,10 +169,10 @@ impl Drop for TempFile {
         if !self.keep {
             let _ = fs::remove_file(&self.path);
         }
-        if let Ok(mut guard) = TEMP_PATH.lock() {
-            if guard.as_ref() == Some(&self.path) {
-                *guard = None;
-            }
+        if let Ok(mut guard) = TEMP_PATH.lock()
+            && guard.as_ref() == Some(&self.path)
+        {
+            *guard = None;
         }
     }
 }

@@ -2,6 +2,7 @@
 
 mod article;
 mod cli;
+mod cover;
 mod decode;
 mod error;
 mod fetch;

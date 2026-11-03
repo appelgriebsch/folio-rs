@@ -12,6 +12,10 @@ pub struct PageMeta {
     pub published: Option<String>,
     /// Absolute http(s) URL of the page's share banner, when the page names one.
     pub banner: Option<String>,
+    /// Share-image candidates in preference order, de-duplicated.
+    /// `og:image`, then `twitter:image` / `twitter:image:src`, then the article
+    /// JSON-LD image, then any JSON-LD image.
+    pub banners: Vec<String>,
     pub base: Url,
 }
 
@@ -95,18 +99,8 @@ pub fn read_meta_doc(doc: &Document, response_url: &Url, typed_url: &Url) -> Pag
         ),
     ]);
     let base = document_base(doc, response_url);
-    let banner = first_nonempty([
-        meta_content(&metas, &["og:image"]).and_then(|raw| absolute_http(&base, &raw)),
-        meta_content(&metas, &["twitter:image", "twitter:image:src"])
-            .and_then(|raw| absolute_http(&base, &raw)),
-        ld.iter()
-            .find(|n| n.article)
-            .and_then(|n| n.image.clone())
-            .and_then(|raw| absolute_http(&base, &raw)),
-        ld.iter()
-            .find_map(|n| n.image.clone())
-            .and_then(|raw| absolute_http(&base, &raw)),
-    ]);
+    let banners = banner_candidates(&metas, &ld, &base);
+    let banner = banners.first().cloned();
     PageMeta {
         title,
         authors,
@@ -115,8 +109,29 @@ pub fn read_meta_doc(doc: &Document, response_url: &Url, typed_url: &Url) -> Pag
         identifier: canonical_identifier(doc).unwrap_or_else(|| typed_url.as_str().to_string()),
         published,
         banner,
+        banners,
         base,
     }
+}
+
+fn banner_candidates(metas: &[MetaTag], ld: &[LdNode], base: &Url) -> Vec<String> {
+    let mut out = Vec::new();
+    let slots = [
+        meta_content(metas, &["og:image"]),
+        meta_content(metas, &["twitter:image", "twitter:image:src"]),
+        ld.iter().find(|n| n.article).and_then(|n| n.image.clone()),
+        ld.iter().find_map(|n| n.image.clone()),
+    ];
+    for raw in slots {
+        let Some(raw) = raw else { continue };
+        let Some(url) = absolute_http(base, &raw) else {
+            continue;
+        };
+        if !out.iter().any(|have| have == &url) {
+            out.push(url);
+        }
+    }
+    out
 }
 
 fn absolute_http(base: &Url, raw: &str) -> Option<String> {
@@ -354,10 +369,10 @@ fn meta_contents(tags: &[MetaTag], keys: &[&str]) -> Vec<String> {
     for tag in tags {
         let name = tag.name.as_deref().unwrap_or("");
         let property = tag.property.as_deref().unwrap_or("");
-        if keys.iter().any(|key| name == *key || property == *key) {
-            if let Some(content) = &tag.content {
-                push_clean(&mut out, content);
-            }
+        if keys.iter().any(|key| name == *key || property == *key)
+            && let Some(content) = &tag.content
+        {
+            push_clean(&mut out, content);
         }
     }
     out
@@ -418,10 +433,10 @@ fn nonempty(text: &str) -> Option<String> {
 }
 
 fn push_clean(out: &mut Vec<String>, text: &str) {
-    if let Some(text) = nonempty(text) {
-        if !out.iter().any(|have| have == &text) {
-            out.push(text);
-        }
+    if let Some(text) = nonempty(text)
+        && !out.iter().any(|have| have == &text)
+    {
+        out.push(text);
     }
 }
 
@@ -492,6 +507,14 @@ mod tests {
         assert_eq!(
             meta.banner.as_deref(),
             Some("http://cdn.example/articles/banner.jpg")
+        );
+        assert_eq!(
+            meta.banners,
+            vec![
+                "http://cdn.example/articles/banner.jpg".to_string(),
+                "https://other.example/card.jpg".to_string(),
+                "https://cdn.example/hero.jpg".to_string(),
+            ]
         );
 
         let twitter = r#"
