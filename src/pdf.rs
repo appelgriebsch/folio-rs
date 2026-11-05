@@ -1,13 +1,15 @@
-//! One article, one PDF. The HTML is a small XHTML subset so `from_html` can parse it.
+//! One article, one PDF. The HTML is a small XHTML subset so printpdf can parse it.
 //!
-//! A render fails the run when `from_html` returns `Err`, the page list is empty,
+//! A render fails the run when layout returns `Err`, the page list is empty,
 //! or any `PdfWarnMsg` has severity `Error`. Info and Warning stay on stderr
 //! and the file is still written. `printpdf` emits Error for a layout or parse
-//! failure and Warning for a missing glyph or a skipped image.
+//! failure and Warning for a skipped image. Fonts are the bundled IBM Plex
+//! files only. A character none of them can draw produces one `warning:` line.
 
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ab_glyph::Font;
 use dom_query::{Document, NodeRef};
 use printpdf::date::{Date, DateTime, Offset, OffsetDateTime, Time};
 use printpdf::{Base64OrRaw, GeneratePdfOptions, PdfDocument, PdfParseOptions, PdfSaveOptions};
@@ -99,6 +101,7 @@ pub fn render(
         .map(|(key, bytes)| (key.clone(), Base64OrRaw::Raw(bytes.clone())))
         .collect();
     let fonts = font_map();
+    let pool = bundled_font_pool();
     let options = GeneratePdfOptions {
         font_embedding: Some(true),
         page_width: Some(210.0),
@@ -110,14 +113,24 @@ pub fn render(
         ..GeneratePdfOptions::default()
     };
     let mut warnings = Vec::new();
-    let mut doc = PdfDocument::from_html(&html, &image_map, &fonts, &options, &mut warnings)
-        .map_err(Error::Write)?;
+    let mut doc = PdfDocument::from_html_with_cache(
+        &html,
+        &image_map,
+        &fonts,
+        &options,
+        &mut warnings,
+        Some(pool),
+    )
+    .map_err(Error::Write)?;
     require_pages(doc.pages.len())?;
     fail_on_layout_errors(&warnings)?;
     for warning in &warnings {
         if warning.severity == printpdf::PdfParseErrorSeverity::Warning {
             eprintln!("warning: pdf: {}", warning.msg);
         }
+    }
+    if plex_lacks(&html) {
+        eprintln!("warning: pdf: IBM Plex Serif has no glyph for a character in this article");
     }
     apply_info(&mut doc, info);
     let bytes = doc.save(&PdfSaveOptions::default(), &mut warnings);
@@ -170,18 +183,40 @@ img {{ max-width: 100%; }}
     )
 }
 
+fn bundled_font_bytes() -> BTreeMap<String, Vec<u8>> {
+    BTreeMap::from([
+        (FAMILY.to_string(), FONT_REGULAR.to_vec()),
+        (format!("{FAMILY} Italic"), FONT_ITALIC.to_vec()),
+        (format!("{FAMILY} Bold"), FONT_BOLD.to_vec()),
+    ])
+}
+
+fn bundled_font_pool() -> printpdf::SharedFontPool {
+    // ponytail: empty family list skips system fonts. A host with no fonts
+    // cannot tell this from a full scan; the PDF then embeds Plex either way.
+    printpdf::build_font_pool(&bundled_font_bytes(), Some(&[]))
+}
+
 fn font_map() -> BTreeMap<String, Base64OrRaw> {
-    let mut fonts = BTreeMap::new();
-    fonts.insert(FAMILY.to_string(), Base64OrRaw::Raw(FONT_REGULAR.to_vec()));
-    fonts.insert(
-        format!("{FAMILY} Italic"),
-        Base64OrRaw::Raw(FONT_ITALIC.to_vec()),
-    );
-    fonts.insert(
-        format!("{FAMILY} Bold"),
-        Base64OrRaw::Raw(FONT_BOLD.to_vec()),
-    );
-    fonts
+    bundled_font_bytes()
+        .into_iter()
+        .map(|(name, bytes)| (name, Base64OrRaw::Raw(bytes)))
+        .collect()
+}
+
+fn plex_lacks(text: &str) -> bool {
+    if text.is_ascii() {
+        return false;
+    }
+    let Ok(fonts) = [FONT_REGULAR, FONT_ITALIC, FONT_BOLD]
+        .into_iter()
+        .map(ab_glyph::FontRef::try_from_slice)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return false;
+    };
+    text.chars()
+        .any(|ch| !ch.is_ascii() && fonts.iter().all(|font| font.glyph_id(ch).0 == 0))
 }
 
 fn apply_info(doc: &mut PdfDocument, info: &PdfMeta<'_>) {
@@ -728,6 +763,34 @@ mod tests {
             }
         }
         panic!("missing {word}");
+    }
+
+    #[test]
+    fn bundled_fonts_are_the_only_pool_and_the_only_embedded_faces() {
+        let pool = bundled_font_pool();
+        let listed = pool.fc_cache.list();
+        assert!(!listed.is_empty());
+        for (pattern, id) in &listed {
+            assert!(pool.fc_cache.is_memory_font(id), "{pattern:?}");
+            let label = pattern
+                .family
+                .as_deref()
+                .or(pattern.name.as_deref())
+                .unwrap_or("");
+            assert!(label.to_ascii_lowercase().contains("plex"), "{pattern:?}");
+        }
+        assert!(plex_lacks("東京"));
+        assert!(plex_lacks("😀"));
+        assert!(!plex_lacks("café Latin"));
+        let bytes = render_html("<h1>東京</h1><p>😀 LatinWord</p>");
+        let names = pdf_font_names(&bytes);
+        assert!(!names.is_empty(), "{names:?}");
+        for name in &names {
+            assert!(
+                name.to_ascii_lowercase().contains("plex"),
+                "{name} in {names:?}"
+            );
+        }
     }
 
     #[test]

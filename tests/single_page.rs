@@ -293,6 +293,10 @@ fn handle(
                 r#"<a href="/missing-print">Druckansicht</a>"#,
             )
         }
+        "/glyph-gap" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            story("東京 Headline", "GLYPH_😀_GAP", "")
+        }
         "/svg-article" => {
             html_hits.fetch_add(1, Ordering::SeqCst);
             let host = host_of(&req);
@@ -1162,6 +1166,25 @@ fn pdf_has_title_author_image_and_no_video_text() {
     assert!(!text.contains("SECRET_VIDEO_PAYLOAD"), "{text}");
     assert!(pdf::pdf_has_image(&bytes), "pdf has no image object");
     assert_plex_only(&bytes);
+}
+
+#[test]
+fn pdf_embeds_only_plex_when_the_article_has_cjk_and_emoji() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/glyph-gap", server.base);
+    let out = folio(&dir, &["--format", "pdf", "-o", "glyph.pdf", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert_eq!(out.stderr.matches("no glyph").count(), 1, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("warning: pdf: IBM Plex Serif has no glyph"),
+        "{}",
+        out.stderr
+    );
+    let bytes = std::fs::read(dir.join("glyph.pdf")).unwrap();
+    assert_plex_only(&bytes);
+    assert_eq!(pdf::pdf_info(&bytes).document_title, "東京 Headline");
 }
 
 #[test]

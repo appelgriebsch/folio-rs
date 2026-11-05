@@ -44,7 +44,7 @@ Exit 2 means the command line or the URL was rejected. Exit 1 means the fetch, t
 
 ## What the PDF contains
 
-`--format pdf` writes one A4 PDF (210×297 mm, 20 mm margins) of the same article. It starts with the title, then the byline and date when the page has them, then the body. There is no cover page. Text is IBM Plex Serif, bundled with the program.
+`--format pdf` writes one A4 PDF (210×297 mm, 20 mm margins) of the same article. It starts with the title, then the byline and date when the page has them, then the body. There is no cover page. Text is IBM Plex Serif, bundled with the program. System fonts are not used. If the article contains a character that font cannot draw, folio prints one warning and still writes the PDF.
 
 When the article page has exactly one same-origin print link, the PDF is built from that page and the EPUB is not. The link's accessible name, as a whole string, is one of: print, print article, print this article, print version, printable version, printer-friendly, printer friendly, print view, Druckansicht, Druckversion. A path segment may be exactly `print`, `printable`, or `printer-friendly`. A failed print fetch warns and uses the article page. A `media="print"` stylesheet is not applied.
 
