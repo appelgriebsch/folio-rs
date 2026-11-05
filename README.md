@@ -48,7 +48,7 @@ Exit 2 means the command line or the URL was rejected. Exit 1 means the fetch, t
 
 When the article page has exactly one same-origin print link, the PDF is built from that page and the EPUB is not. The link's accessible name, as a whole string, is one of: print, print article, print this article, print version, printable version, printer-friendly, printer friendly, print view, Druckansicht, Druckversion. A path segment may be exactly `print`, `printable`, or `printer-friendly`. A failed print fetch warns and uses the article page. A `media="print"` stylesheet is not applied.
 
-The info dictionary carries the title, the author, and the description as the subject. The creation date is the article's publish date when the page has one. A date-only value is midnight UTC. A timestamp keeps its offset. With no publish date, the creation date is the file time, and the modification date is always the file time.
+The info dictionary carries the title, the author, and the description as the subject. The creation date is the article's publish date when the page has one: `YYYY-MM-DD` or `YYYY/MM/DD`, optionally with a time whose seconds may be omitted. A date-only value is midnight UTC. A timestamp keeps its offset. An impossible calendar day or clock is ignored. With no usable publish date, the creation date is the file time, and the modification date is always the file time.
 
 JPEG, PNG, and GIF images are embedded. An SVG is omitted with a warning and the PDF is still written.
 

@@ -185,10 +185,15 @@ fn apply_info(doc: &mut PdfDocument, info: &PdfMeta<'_>) {
     dict.metadata_date = file_time;
 }
 
-/// Date-only publish dates are midnight UTC. A full timestamp keeps its offset.
-/// Anything else is not a date.
+/// Date-only publish dates are midnight UTC. A timestamp keeps its offset.
+/// `/` is a date separator, seconds may be omitted, and a fractional second is ignored.
+/// A non-ASCII string, an impossible day, or an impossible clock is not a date.
 pub fn publish_date(raw: &str) -> Option<OffsetDateTime> {
     let raw = raw.trim();
+    // Byte indexes below are only safe on ASCII. Non-ASCII page dates must not panic.
+    if !raw.is_ascii() {
+        return None;
+    }
     let (date, rest) = split_date(raw)?;
     if rest.is_empty() {
         return Some(at(date, 0, 0, 0, 0));
@@ -232,53 +237,73 @@ fn at(date: (i32, u8, u8), hour: u8, minute: u8, second: u8, offset_minutes: i32
 
 fn split_date(raw: &str) -> Option<((i32, u8, u8), &str)> {
     let bytes = raw.as_bytes();
-    if bytes.len() < 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+    let sep = *bytes.get(4)?;
+    if (sep != b'-' && sep != b'/') || bytes.get(7) != Some(&sep) || bytes.len() < 10 {
         return None;
     }
-    let year: i32 = raw[0..4].parse().ok()?;
-    let month: u8 = raw[5..7].parse().ok()?;
-    let day: u8 = raw[8..10].parse().ok()?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    let year: i32 = raw.get(0..4)?.parse().ok()?;
+    let month: u8 = raw.get(5..7)?.parse().ok()?;
+    let day: u8 = raw.get(8..10)?.parse().ok()?;
+    if !valid_day(year, month, day) {
         return None;
     }
-    Some(((year, month, day), &raw[10..]))
+    Some(((year, month, day), raw.get(10..)?))
+}
+
+fn valid_day(year: i32, month: u8, day: u8) -> bool {
+    let max = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=max).contains(&day)
 }
 
 fn split_clock(raw: &str) -> Option<(u8, u8, u8, &str)> {
     let bytes = raw.as_bytes();
-    if bytes.len() < 8 || bytes[2] != b':' || bytes[5] != b':' {
+    if bytes.get(2) != Some(&b':') {
         return None;
     }
-    let hour: u8 = raw[0..2].parse().ok()?;
-    let minute: u8 = raw[3..5].parse().ok()?;
-    let second: u8 = raw[6..8].parse().ok()?;
-    if hour > 23 || minute > 59 || second > 60 {
+    let hour: u8 = raw.get(0..2)?.parse().ok()?;
+    let minute: u8 = raw.get(3..5)?.parse().ok()?;
+    let (second, tail) = if bytes.get(5) == Some(&b':') {
+        (raw.get(6..8)?.parse().ok()?, raw.get(8..)?)
+    } else {
+        (0, raw.get(5..)?)
+    };
+    if hour > 23 || minute > 59 || second > 59 {
         return None;
     }
-    let mut tail = &raw[8..];
-    if tail.starts_with('.') {
-        let digits = tail[1..]
-            .chars()
-            .take_while(|ch| ch.is_ascii_digit())
-            .count();
-        if digits == 0 {
-            return None;
-        }
-        tail = &tail[1 + digits..];
+    Some((hour, minute, second, skip_fraction(tail)?))
+}
+
+fn skip_fraction(tail: &str) -> Option<&str> {
+    if !tail.starts_with('.') {
+        return Some(tail);
     }
-    Some((hour, minute, second, tail))
+    let digits = tail
+        .get(1..)?
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    tail.get(1 + digits..)
 }
 
 fn parse_offset(raw: &str) -> Option<i32> {
     let (sign, rest) = match raw.as_bytes().first()? {
-        b'+' => (1, &raw[1..]),
-        b'-' => (-1, &raw[1..]),
+        b'+' => (1, raw.get(1..)?),
+        b'-' => (-1, raw.get(1..)?),
         _ => return None,
     };
     let (hours, minutes) = if let Some((hours, minutes)) = rest.split_once(':') {
         (hours, minutes)
     } else if rest.len() == 4 {
-        rest.split_at(2)
+        (rest.get(..2)?, rest.get(2..)?)
     } else if rest.len() == 2 {
         (rest, "00")
     } else {
@@ -617,34 +642,62 @@ mod tests {
     }
 
     #[test]
-    fn date_only_is_midnight_utc_and_a_timestamp_keeps_its_offset() {
-        let day = publish_date("2024-05-06").unwrap();
-        assert_eq!(day.date.year, 2024);
-        assert_eq!(day.date.month, 5);
-        assert_eq!(day.date.day, 6);
-        assert_eq!(day.time.hour, 0);
-        assert_eq!(day.time.minute, 0);
-        assert_eq!(day.time.second, 0);
-        assert_eq!(day.offset.hours, 0);
-        assert_eq!(day.offset.minutes, 0);
-        assert_eq!(day.unix_timestamp(), 1_714_953_600);
-
-        let zoned = publish_date("2024-05-06T15:04:05+02:00").unwrap();
-        assert_eq!(zoned.time.hour, 15);
-        assert_eq!(zoned.time.minute, 4);
-        assert_eq!(zoned.time.second, 5);
-        assert_eq!(zoned.offset.hours, 2);
-        assert_eq!(zoned.offset.minutes, 0);
-        assert_eq!(zoned.unix_timestamp(), 1_715_000_645);
-
+    fn publish_date_accepts_page_dates_and_rejects_impossible_ones() {
+        let cases = [
+            ("2024-05-06", Some(1_714_953_600_i64)),
+            ("2024/05/06", Some(1_714_953_600)),
+            ("2024-05-06T10:00:00Z", Some(1_714_989_600)),
+            ("2024-05-06T10:00:00.123Z", Some(1_714_989_600)),
+            ("2024-05-06T10:00:00.123+00:00", Some(1_714_989_600)),
+            ("2024-05-06T10:00:00z", Some(1_714_989_600)),
+            ("2024-05-06T10:00:00", Some(1_714_989_600)),
+            ("2024-05-06t10:00:00Z", Some(1_714_989_600)),
+            ("2024-05-06 10:00:00Z", Some(1_714_989_600)),
+            ("2024-05-06T15:04+02:00", Some(1_715_000_640)),
+            ("2024-05-06T15:04:05+02:00", Some(1_715_000_645)),
+            ("2020-01-02T03:04:05-0530", Some(1_577_954_045)),
+            ("2024-05-06T15:04:05+0530", Some(1_714_988_045)),
+            ("2024-05-06T12:00:00+05", Some(1_714_978_800)),
+            ("2024-05-06T00:00:00+23:59", Some(1_714_867_260)),
+            ("2024-05-06T00:00:00+00:59", Some(1_714_950_060)),
+            ("2024-02-29", Some(1_709_164_800)),
+            ("2000-02-29", Some(951_782_400)),
+            ("2023-02-28", Some(1_677_542_400)),
+            ("2024-01-01", Some(1_704_067_200)),
+            ("2024-12-31", Some(1_735_603_200)),
+            ("2024-04-30", Some(1_714_435_200)),
+            ("2024-05-06T23:59:59Z", Some(1_715_039_999)),
+            ("2024-02-31", None),
+            ("2023-02-29", None),
+            ("1900-02-29", None),
+            ("2024-04-31", None),
+            ("2024-13-01", None),
+            ("2024-00-10", None),
+            ("2024-01-32", None),
+            ("2024-05-00", None),
+            ("2024-05x06", None),
+            ("2024-05/06", None),
+            ("2024/05-06", None),
+            ("2024-05-06T24:00:00Z", None),
+            ("2024-05-06T23:60:00Z", None),
+            ("2024-05-06T23:59:60Z", None),
+            ("2024-05-06T10:00:00.Z", None),
+            ("2024-05-06T15:04:05+24:00", None),
+            ("2024-05-06T15:04:05+00:60", None),
+            ("2024-05-06T12:34:5é", None),
+            ("2024-05-06T12:34:56+1é1", None),
+            ("not a date", None),
+            ("", None),
+        ];
+        for (raw, expect) in cases {
+            let got = publish_date(raw).map(|date| date.unix_timestamp());
+            assert_eq!(got, expect, "{raw}");
+        }
         let compact = publish_date("2020-01-02T03:04:05-0530").unwrap();
         assert_eq!(compact.offset.hours, -5);
         assert_eq!(compact.offset.minutes, -30);
-
         let file = system_time_to_pdf(UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000));
         assert_eq!(file.unix_timestamp(), 1_700_000_000);
-        assert!(publish_date("not a date").is_none());
-        assert!(publish_date("").is_none());
     }
 
     #[test]
