@@ -46,18 +46,28 @@ pub async fn publish(opts: Options) -> Result<std::path::PathBuf, Error> {
     let _single_page = pages_fetched(opts.max_pages);
     let explicit = output::prepare_explicit_output(&opts)?;
     let format = output::agree_format(opts.format, explicit.as_deref())?;
-    let rendered = crate::service::render(crate::service::RenderRequest {
+    let request = crate::service::RenderRequest {
         url: opts.url.clone(),
         format,
         verbose: opts.verbose,
-    })
-    .await?;
+    };
+    // An explicit -o path must not require a slugifiable title.
+    let (title, bytes) = match explicit.as_deref() {
+        Some(_) => {
+            let composed = crate::service::compose_url(&request).await?;
+            crate::service::render_composed(composed, format).await?
+        }
+        None => {
+            let rendered = crate::service::render(request).await?;
+            (rendered.title, rendered.bytes)
+        }
+    };
     let output = match explicit {
         Some(path) => path,
-        None => output::path_from_title(&rendered.title, &opts)?,
+        None => output::path_from_title(&title, &opts)?,
     };
     let temp = TempFile::new(&output)?;
-    std::fs::write(temp.path(), &rendered.bytes).map_err(|err| Error::Write(err.to_string()))?;
+    std::fs::write(temp.path(), &bytes).map_err(|err| Error::Write(err.to_string()))?;
     temp.persist(&output)?;
     Ok(output)
 }

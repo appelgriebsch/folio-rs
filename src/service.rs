@@ -150,17 +150,28 @@ pub fn file_name(title: &str, format: Format) -> Result<String, Error> {
 pub async fn render(req: RenderRequest) -> Result<Rendered, Error> {
     let composed = compose_url(&req).await?;
     let file_name = file_name(&composed.title, req.format)?;
-    let title = composed.title.clone();
-    let bytes = match req.format {
-        Format::Epub => publish::epub_bytes(&composed)?,
-        Format::Pdf => pdf_bytes(composed).await?,
-    };
+    let (title, bytes) = render_composed(composed, req.format).await?;
     Ok(Rendered {
         file_name,
         title,
         bytes,
         format: req.format,
     })
+}
+
+/// Render bytes for an already-composed article. The CLI uses this with an
+/// explicit output path, where a title-based file name is never needed (and
+/// must not fail the run for an unslugifiable title).
+pub(crate) async fn render_composed(
+    composed: Composed,
+    format: Format,
+) -> Result<(String, Vec<u8>), Error> {
+    let title = composed.title.clone();
+    let bytes = match format {
+        Format::Epub => publish::epub_bytes(&composed)?,
+        Format::Pdf => pdf_bytes(composed).await?,
+    };
+    Ok((title, bytes))
 }
 
 /// printpdf rendering is synchronous CPU work; keep it off the runtime thread.

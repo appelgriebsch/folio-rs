@@ -64,7 +64,10 @@ async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
             (source_url, query.get("format").cloned())
         }
         Method::Post => {
-            let payload: Payload = req.json().await?;
+            let payload: Payload = match req.json().await {
+                Ok(payload) => payload,
+                Err(_) => return json_error(400, "body must be a JSON object with sourceUrl"),
+            };
             (payload.source_url, payload.format)
         }
         _ => return json_error(405, "use GET with query parameters or POST a JSON body"),
@@ -182,7 +185,7 @@ fn file_response(bytes: &[u8], file_name: &str, format: Format, title: &str) -> 
     let headers = Headers::new();
     headers.set("Content-Type", format.media_type())?;
     headers.set("Content-Disposition", &content_disposition(file_name))?;
-    if title.is_ascii() {
+    if title.chars().all(|ch| ch.is_ascii() && !ch.is_control()) {
         headers.set("X-Folio-Title", title)?;
     }
     Ok(Response::from_bytes(bytes.to_vec())?.with_headers(headers))
