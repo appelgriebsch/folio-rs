@@ -39,7 +39,7 @@ Direct dependencies from `Cargo.toml` / `Cargo.lock`, plus the GitHub Actions us
 | xmlparser | 0.13.6 | MIT OR Apache-2.0 | | none found |
 | zip | 8.6.0 | MIT | | none found |
 
-Rows for `printpdf` and the crates it pulls in (`allsorts-azul`, `azul-core`, `azul-css`, `azul-layout`, `azul-simplecss`, `hyphenation`, `lopdf`, `rust-fontconfig`) are the direct dependency plus the layout, font, and PDF crates. `xmlparser` is a direct dependency. Smaller transitive crates stay in `Cargo.lock`.
+Rows for `printpdf` and the crates it pulls in (`allsorts-azul`, `azul-core`, `azul-css`, `azul-layout`, `azul-simplecss`, `hyphenation`, `lopdf`, `rust-fontconfig`) are the direct dependency plus the layout, font, and PDF crates. `xmlparser` is a dev-dependency. Smaller transitive crates stay in `Cargo.lock`.
 
 `azul-simplecss` 0.2.3 is MPL-2.0. `printpdf` reaches it through `azul-layout` → `azul-css`. MPL-2.0 is weak copyleft on that file, not MIT/Apache/BSD. Andreas accepted it on 2026-11-05: it is used unmodified from crates.io. `r-efi` 6.0.0 is MIT OR Apache-2.0 OR LGPL-2.1-or-later (the LGPL term is optional). `cssparser` and `selectors` (MPL-2.0) were already in the tree through `dom_query`.
 

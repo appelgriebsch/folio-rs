@@ -29,6 +29,8 @@ unicode-normalization = "0.1"
 url = "2"
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 printpdf = { version = "0.12.8", default-features = false, features = ["html", "jpeg", "png", "gif"] }
+
+[dev-dependencies]
 xmlparser = "0.13"
 
 # Raster, resize, and JPEG dominate cover tests. Optimise those crates in dev.
