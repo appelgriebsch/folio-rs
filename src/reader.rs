@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use dom_query::{Document, NodeRef};
 use url::Url;
 
@@ -250,6 +252,95 @@ fn attr(node: &NodeRef<'_>, name: &str) -> Option<String> {
     node.attr(name).map(|value| value.to_string())
 }
 
+const PRINT_NAMES: [&str; 10] = [
+    "print",
+    "print article",
+    "print this article",
+    "print version",
+    "printable version",
+    "printer-friendly",
+    "printer friendly",
+    "print view",
+    "druckansicht",
+    "druckversion",
+];
+
+const PRINT_SEGMENTS: [&str; 3] = ["print", "printable", "printer-friendly"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrintScan {
+    None,
+    One(Url),
+    Several,
+}
+
+/// Exactly one same-origin http(s) print link, or none.
+/// Two different URLs are several. The same URL twice is one.
+pub fn find_print_link(doc: &Document, base: &Url) -> PrintScan {
+    let mut urls = BTreeSet::new();
+    let mut found = None;
+    for node in doc.select("a[href], link[href]").nodes() {
+        let Some(url) = print_candidate(*node, base) else {
+            continue;
+        };
+        found = Some(url.clone());
+        urls.insert(url_key(&url));
+        if urls.len() > 1 {
+            return PrintScan::Several;
+        }
+    }
+    match found {
+        Some(url) => PrintScan::One(url),
+        None => PrintScan::None,
+    }
+}
+
+pub fn print_verbose_line(found: &PrintScan) -> String {
+    match found {
+        PrintScan::One(url) => format!("print view: {url}"),
+        PrintScan::Several => "print view: kept the article page (several print links)".to_string(),
+        PrintScan::None => "print view: kept the article page (no print link)".to_string(),
+    }
+}
+
+fn print_candidate(node: NodeRef<'_>, base: &Url) -> Option<Url> {
+    let href = attr(&node, "href")?;
+    if fragment_only(&href) {
+        return None;
+    }
+    let mut url = base.join(href.trim()).ok()?;
+    url.set_fragment(None);
+    if !is_http(&url) || !same_origin(&url, base) {
+        return None;
+    }
+    if print_name_matches(&accessible_name(&node)) || print_path_matches(&url) {
+        Some(url)
+    } else {
+        None
+    }
+}
+
+/// Whole accessible name, trimmed, case-insensitive, whitespace collapsed.
+fn print_name_matches(name: &str) -> bool {
+    let folded = collapse_ws(&name.to_ascii_lowercase());
+    PRINT_NAMES.iter().any(|label| *label == folded)
+}
+
+fn print_path_matches(url: &Url) -> bool {
+    url.path()
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .any(|segment| {
+            PRINT_SEGMENTS
+                .iter()
+                .any(|token| segment.eq_ignore_ascii_case(token))
+        })
+}
+
+fn collapse_ws(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,6 +546,71 @@ mod tests {
             }
             other => panic!("expected the base-href reader link, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn print_labels_and_path_segments_match_as_whole_strings() {
+        const BASE: &str = "http://example.com/news/article";
+        for label in [
+            "print",
+            "Print",
+            "  PRINT  ",
+            "print   article",
+            "Print This Article",
+            "print version",
+            "Printable Version",
+            "printer-friendly",
+            "printer friendly",
+            "Print View",
+            "Druckansicht",
+            "druckversion",
+        ] {
+            let html = format!(r#"<a href="/p">{}</a>"#, label);
+            let scan = find_print_link(&Document::from(html.as_str()), &Url::parse(BASE).unwrap());
+            let PrintScan::One(url) = scan else {
+                panic!("{label} should be one print link, got {scan:?}");
+            };
+            assert_eq!(url.as_str(), "http://example.com/p", "{label}");
+        }
+        for href in ["/print", "/Printable/story", "/news/printer-friendly"] {
+            let html = format!(r#"<a href="{href}">open</a>"#);
+            let scan = find_print_link(&Document::from(html.as_str()), &Url::parse(BASE).unwrap());
+            assert!(matches!(scan, PrintScan::One(_)), "{href} -> {scan:?}");
+        }
+        for html in [
+            r#"<a href="/imprint">imprint</a>"#,
+            r#"<a href="/blueprint">open</a>"#,
+            r#"<a href="/p">Print this page now</a>"#,
+            r#"<a href="/p">screen reader</a>"#,
+            r#"<a href="javascript:print">print</a>"#,
+            r#"<a href="mailto:ed@example.com">print</a>"#,
+            r#"<a href="https://other.example/print">print</a>"#,
+            r#"<a href="/a">print</a><a href="/b">Druckansicht</a>"#,
+        ] {
+            let scan = find_print_link(&Document::from(html), &Url::parse(BASE).unwrap());
+            assert!(!matches!(scan, PrintScan::One(_)), "{html} -> {scan:?}");
+        }
+        assert!(matches!(
+            find_print_link(
+                &Document::from(r#"<a href="/a">print</a><a href="/b">Druckansicht</a>"#),
+                &Url::parse(BASE).unwrap(),
+            ),
+            PrintScan::Several
+        ));
+        assert_eq!(
+            print_verbose_line(&PrintScan::Several),
+            "print view: kept the article page (several print links)"
+        );
+        let twice = find_print_link(
+            &Document::from(
+                r#"<a href="/print">nope</a><a href="http://example.com/print">print</a>"#,
+            ),
+            &Url::parse(BASE).unwrap(),
+        );
+        let PrintScan::One(twice) = twice else {
+            panic!("the same print url twice is one link");
+        };
+        assert_eq!(twice.as_str(), "http://example.com/print");
     }
 
     #[test]
