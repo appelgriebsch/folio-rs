@@ -49,6 +49,24 @@ const BLOCKS: &[&str] = &[
     "i",
 ];
 
+/// Block elements printpdf will not lay out. Emitted as `<p>` so their text stays.
+const AS_P: &[&str] = &[
+    "div",
+    "section",
+    "article",
+    "figure",
+    "figcaption",
+    "dl",
+    "dt",
+    "dd",
+    "pre",
+    "caption",
+    "header",
+    "footer",
+    "aside",
+    "address",
+];
+
 pub struct PdfMeta<'a> {
     pub title: &'a str,
     pub meta: &'a PageMeta,
@@ -348,12 +366,30 @@ fn write_node(
         }
         return;
     }
-    if !BLOCKS.contains(&name.as_str()) {
+    if name == "sup" || name == "sub" {
+        out.push(if name == "sup" { '^' } else { '_' });
         for child in node.children() {
             write_node(&child, images, map, out);
         }
         return;
     }
+    if name == "hr" {
+        return;
+    }
+    if name == "table" {
+        write_table(node, images, map, out);
+        return;
+    }
+    let tag = if AS_P.contains(&name.as_str()) {
+        "p"
+    } else if BLOCKS.contains(&name.as_str()) {
+        name.as_str()
+    } else {
+        for child in node.children() {
+            write_node(&child, images, map, out);
+        }
+        return;
+    };
     if name == "br" {
         out.push_str("<br/>");
         return;
@@ -385,14 +421,43 @@ fn write_node(
         }
     }
     out.push('<');
-    out.push_str(&name);
+    out.push_str(tag);
     out.push('>');
     for child in node.children() {
         write_node(&child, images, map, out);
     }
     out.push_str("</");
-    out.push_str(&name);
+    out.push_str(tag);
     out.push('>');
+}
+
+fn write_table(
+    node: &NodeRef<'_>,
+    images: &[EmbeddedImage],
+    map: &mut BTreeMap<String, Vec<u8>>,
+    out: &mut String,
+) {
+    for child in node.children() {
+        if is_tag(&child, "caption") {
+            out.push_str("<p>");
+            for grand in child.children() {
+                write_node(&grand, images, map, out);
+            }
+            out.push_str("</p>");
+        }
+    }
+    out.push_str("<table>");
+    for child in node.children() {
+        if !is_tag(&child, "caption") {
+            write_node(&child, images, map, out);
+        }
+    }
+    out.push_str("</table>");
+}
+
+fn is_tag(node: &NodeRef<'_>, want: &str) -> bool {
+    node.node_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(want))
 }
 
 fn is_nested_list(node: &NodeRef<'_>) -> bool {
@@ -548,6 +613,30 @@ mod tests {
         for token in xmlparser::Tokenizer::from(xml.as_str()) {
             token.expect("well-formed xml");
         }
+    }
+
+    #[test]
+    fn unlisted_blocks_become_paragraphs() {
+        let html = "<div>Alpha</div><section>Sec</section><article>Art</article><figure>Fig</figure><figcaption>CapFig</figcaption><dl><dt>TermWord</dt><dd>DefWord</dd></dl><pre>PreWord</pre><header>Head</header><footer>Foot</footer><aside>Side</aside><address>Addr</address><hr><p>10<sup>6</sup> and H<sub>2</sub>O</p><table><caption>CapWord</caption><tbody><tr><td>Cell</td></tr></tbody></table>";
+        let (body, _) = article_xhtml(html, &[]);
+        assert_eq!(
+            body,
+            "<p>Alpha</p><p>Sec</p><p>Art</p><p>Fig</p><p>CapFig</p><p><p>TermWord</p><p>DefWord</p></p><p>PreWord</p><p>Head</p><p>Foot</p><p>Side</p><p>Addr</p><p>10^6 and H_2O</p><p>CapWord</p><table><tbody><tr><td>Cell</td></tr></tbody></table>"
+        );
+    }
+
+    #[test]
+    fn flattened_blocks_stay_separate_in_the_pdf() {
+        let html = "<dl><dt>TermWord</dt><dd>DefWord</dd></dl><table><caption>CapWord</caption><tr><td>Cell</td></tr></table><p>10<sup>6</sup></p><div>Alpha</div><div>Beta</div>";
+        let text = pdf_text(&render_html(html));
+        assert!(text.contains("TermWord"), "{text}");
+        assert!(text.contains("DefWord"), "{text}");
+        assert!(!text.contains("TermWordDefWord"), "{text}");
+        assert!(text.contains("CapWord"), "{text}");
+        assert!(text.contains("10^6"), "{text}");
+        assert!(text.contains("Alpha"), "{text}");
+        assert!(text.contains("Beta"), "{text}");
+        assert!(!text.contains("AlphaBeta"), "{text}");
     }
 
     #[test]
