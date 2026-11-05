@@ -704,6 +704,62 @@ mod tests {
     }
 
     #[test]
+    fn a4_page_keeps_twenty_millimetre_margins() {
+        let mut html = String::from("<h1>TitleWord</h1><p>");
+        for _ in 0..24 {
+            html.push_str("WideWord ");
+        }
+        html.push_str("</p>");
+        for i in 0..70 {
+            html.push_str(&format!(
+                "<p>Fill{i} stays as its own paragraph on the page.</p>"
+            ));
+        }
+        let bytes = render_html(&html);
+        let mut warnings = Vec::new();
+        let doc = PdfDocument::parse(
+            &bytes,
+            &PdfParseOptions {
+                fail_on_error: false,
+            },
+            &mut warnings,
+        )
+        .unwrap();
+        let page = &doc.pages[0];
+        // 210 mm × 297 mm. 1 mm = 72/25.4 pt.
+        assert!(
+            (page.media_box.width.0 - 595.28).abs() < 0.5,
+            "{}",
+            page.media_box.width.0
+        );
+        assert!(
+            (page.media_box.height.0 - 841.89).abs() < 0.5,
+            "{}",
+            page.media_box.height.0
+        );
+        let lines = &doc.extract_text_boxes()[0].lines;
+        let word = &lines[0].words[0];
+        assert_eq!(word.text, "TitleWord");
+        // 20 mm is 56.69 pt. h1 inset puts the first glyph at 62.69, 71.47.
+        assert!((word.bbox[0] - 62.69).abs() < 0.5, "x {}", word.bbox[0]);
+        assert!((word.bbox[1] - 71.47).abs() < 0.5, "y {}", word.bbox[1]);
+        let wide = lines
+            .iter()
+            .find(|line| line.words.iter().any(|item| item.text == "WideWord"))
+            .unwrap();
+        assert_eq!(wide.words.len(), 8, "right edge {}", wide.bbox[2]);
+        assert!(
+            (wide.bbox[2] - 512.18).abs() < 0.5,
+            "right {}",
+            wide.bbox[2]
+        );
+        // The last line sits just above the bottom margin. One more line does not fit.
+        assert_eq!(lines.len(), 28, "bottom");
+        let last_y = lines.last().unwrap().bbox[3];
+        assert!((last_y - 765.52).abs() < 0.5, "bottom {last_y}");
+    }
+
+    #[test]
     fn blockquote_css_indents_the_quote() {
         let xml = wrap("<blockquote>QuoteStart</blockquote>", "t");
         assert!(xml.contains("blockquote { margin-left: 8mm; }"), "{xml}");
