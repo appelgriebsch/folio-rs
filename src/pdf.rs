@@ -139,6 +139,7 @@ fn wrap(body: &str, title: &str) -> String {
 body {{ font-family: "{FAMILY}"; font-size: 11pt; font-weight: 400; font-style: normal; }}
 h1, h2, h3, h4, h5, h6, strong, b {{ font-family: "{FAMILY}"; font-weight: 700; font-style: normal; }}
 em, i {{ font-family: "{FAMILY}"; font-weight: 400; font-style: italic; }}
+blockquote {{ margin-left: 8mm; }}
 img {{ max-width: 100%; }}
 </style>
 </head>
@@ -336,6 +337,28 @@ fn write_node(
         write_img(node, images, map, out);
         return;
     }
+    if name == "li" {
+        let children = node.children();
+        if children.iter().any(is_nested_list) {
+            // ponytail: printpdf 0.12.8 duplicates an li's text when that li also
+            // contains a ul or ol. Hoist each nested list to a sibling after the li.
+            // Text that sat after the nested list is kept, but moves ahead of it.
+            // Put the list back inside the li when printpdf stops doubling the text.
+            out.push_str("<li>");
+            for child in &children {
+                if !is_nested_list(child) {
+                    write_node(child, images, map, out);
+                }
+            }
+            out.push_str("</li>");
+            for child in &children {
+                if is_nested_list(child) {
+                    write_node(child, images, map, out);
+                }
+            }
+            return;
+        }
+    }
     out.push('<');
     out.push_str(&name);
     out.push('>');
@@ -345,6 +368,14 @@ fn write_node(
     out.push_str("</");
     out.push_str(&name);
     out.push('>');
+}
+
+fn is_nested_list(node: &NodeRef<'_>) -> bool {
+    let Some(name) = node.node_name() else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    name == "ul" || name == "ol"
 }
 
 fn write_img(
@@ -475,7 +506,7 @@ mod tests {
         assert!(body.contains("kept inside"), "{body}");
         assert!(body.contains("SECRET"), "{body}");
         assert!(
-            body.contains("<ul><li>one<ol><li>nested</li></ol></li></ul>"),
+            body.contains("<ul><li>one</li><ol><li>nested</li></ol></ul>"),
             "{body}"
         );
         assert!(
@@ -492,6 +523,97 @@ mod tests {
         for token in xmlparser::Tokenizer::from(xml.as_str()) {
             token.expect("well-formed xml");
         }
+    }
+
+    #[test]
+    fn nested_lists_are_hoisted_beside_the_li() {
+        let html =
+            r#"<ul><li>outer one<ol><li>nested alpha</li></ol> tail</li><li>outer two</li></ul>"#;
+        let (body, _) = article_xhtml(html, &[]);
+        assert_eq!(
+            body,
+            "<ul><li>outer one tail</li><ol><li>nested alpha</li></ol><li>outer two</li></ul>"
+        );
+
+        let deep = r#"<ul><li>a<ol><li>b<ul><li>c</li></ul> after</li></ol></li></ul>"#;
+        let (body, _) = article_xhtml(deep, &[]);
+        assert_eq!(
+            body,
+            "<ul><li>a</li><ol><li>b after</li><ul><li>c</li></ul></ol></ul>"
+        );
+    }
+
+    #[test]
+    fn nested_list_text_appears_once_in_order() {
+        let html = r#"<ul><li>outer one<ol><li>nested alpha</li></ol></li><li>outer two</li></ul>"#;
+        let text = pdf_text(&render_html(html));
+        assert_eq!(text.matches("outer one").count(), 1, "{text}");
+        let one = text.find("outer one").unwrap();
+        let alpha = text.find("nested alpha").unwrap();
+        let two = text.find("outer two").unwrap();
+        assert!(one < alpha && alpha < two, "{text}");
+    }
+
+    #[test]
+    fn blockquote_css_indents_the_quote() {
+        let xml = wrap("<blockquote>QuoteStart</blockquote>", "t");
+        assert!(xml.contains("blockquote { margin-left: 8mm; }"), "{xml}");
+        let bytes = render_html("<p>ParaStart stays</p><blockquote>QuoteStart inset</blockquote>");
+        let para = word_x(&bytes, "ParaStart");
+        let quote = word_x(&bytes, "QuoteStart");
+        let delta = quote - para;
+        // 8mm is 22.68pt. printpdf applies this margin; without the rule the delta is 0.
+        assert!(
+            (delta - 22.68).abs() < 1.0,
+            "para {para} quote {quote} delta {delta}"
+        );
+    }
+
+    fn render_html(html: &str) -> Vec<u8> {
+        let meta = PageMeta {
+            title: None,
+            authors: Vec::new(),
+            description: None,
+            language: "en".to_string(),
+            identifier: "https://example.com/a".to_string(),
+            published: None,
+            banner: None,
+            banners: Vec::new(),
+            base: url::Url::parse("https://example.com/a").unwrap(),
+        };
+        let (body, images) = article_xhtml(html, &[]);
+        render(
+            &body,
+            &images,
+            &PdfMeta {
+                title: "t",
+                meta: &meta,
+                file_time: UNIX_EPOCH,
+            },
+        )
+        .unwrap()
+    }
+
+    fn word_x(bytes: &[u8], word: &str) -> f32 {
+        let mut warnings = Vec::new();
+        let doc = PdfDocument::parse(
+            bytes,
+            &PdfParseOptions {
+                fail_on_error: false,
+            },
+            &mut warnings,
+        )
+        .unwrap_or_else(|err| panic!("pdf parse failed: {err}"));
+        for page in doc.extract_text_boxes() {
+            for line in page.lines {
+                for item in line.words {
+                    if item.text == word {
+                        return item.bbox[0];
+                    }
+                }
+            }
+        }
+        panic!("missing {word}");
     }
 
     #[test]
