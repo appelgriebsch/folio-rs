@@ -1,7 +1,8 @@
-use std::io::{IsTerminal, Read};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
-use reqwest::blocking::{Client, Response};
+use reqwest::Client;
+#[cfg(not(target_arch = "wasm32"))]
 use reqwest::redirect::Policy;
 use url::Url;
 
@@ -9,6 +10,7 @@ use crate::decode::decode_html;
 use crate::error::Error;
 
 pub const MAX_HTML_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_REDIRECTS: usize = 10;
 
 pub struct Page {
@@ -17,7 +19,11 @@ pub struct Page {
 }
 
 pub fn client() -> Result<Client, Error> {
-    Client::builder()
+    // Timeouts and the redirect policy hook exist on native clients only;
+    // the wasm32 client runs inside the Fetch API, which applies its own
+    // redirect and deadline handling.
+    #[cfg(not(target_arch = "wasm32"))]
+    let builder = Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .redirect(Policy::custom(|attempt| {
@@ -30,21 +36,23 @@ pub fn client() -> Result<Client, Error> {
             }
             attempt.follow()
         }))
-        .user_agent("folio/0.1")
-        .build()
-        .map_err(|err| Error::Fetch {
-            url: "client".to_string(),
-            reason: err.to_string(),
-        })
+        .user_agent("folio/0.1");
+    #[cfg(target_arch = "wasm32")]
+    let builder = Client::builder().user_agent("folio/0.1");
+    builder.build().map_err(|err| Error::Fetch {
+        url: "client".to_string(),
+        reason: err.to_string(),
+    })
 }
 
-pub fn fetch_html(http: &Client, typed_url: &Url, verbose: bool) -> Result<Page, Error> {
-    if verbose || std::io::stderr().is_terminal() {
-        eprintln!("fetch {typed_url}");
+pub async fn fetch_html(http: &Client, typed_url: &Url, verbose: bool) -> Result<Page, Error> {
+    if verbose || stderr_is_terminal() {
+        crate::log_line(&format!("fetch {typed_url}"));
     }
     let response = http
         .get(typed_url.clone())
         .send()
+        .await
         .map_err(|err| fetch_err(typed_url, err))?;
     let response_url = response.url().clone();
     if response_url.scheme() != "http" && response_url.scheme() != "https" {
@@ -65,14 +73,18 @@ pub fn fetch_html(http: &Client, typed_url: &Url, verbose: bool) -> Result<Page,
     {
         return Err(Error::TooLarge(response_url.to_string()));
     }
-    let content_type = header_str(&response, reqwest::header::CONTENT_TYPE);
-    let bytes = read_capped(response, MAX_HTML_BYTES).map_err(|err| {
-        if err.kind() == std::io::ErrorKind::FileTooLarge {
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let bytes = read_capped(response, MAX_HTML_BYTES).await.map_err(|err| {
+        if err == "cap" {
             Error::TooLarge(response_url.to_string())
         } else {
             Error::Fetch {
                 url: response_url.to_string(),
-                reason: err.to_string(),
+                reason: err,
             }
         }
     })?;
@@ -80,30 +92,31 @@ pub fn fetch_html(http: &Client, typed_url: &Url, verbose: bool) -> Result<Page,
     Ok(Page { response_url, html })
 }
 
-fn header_str(response: &Response, name: reqwest::header::HeaderName) -> Option<String> {
-    response
-        .headers()
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
+/// Native responses stream chunk by chunk so the cap stops the read early.
+#[cfg(not(target_arch = "wasm32"))]
+async fn read_capped(mut response: reqwest::Response, max: usize) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|err| err.to_string())? {
+        if exceeds_cap(buf.len(), chunk.len(), max) {
+            return Err("cap".to_string());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
-fn read_capped(mut reader: impl Read, max: usize) -> Result<Vec<u8>, std::io::Error> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let read = reader.read(&mut chunk)?;
-        if read == 0 {
-            return Ok(buf);
-        }
-        if buf.len() + read > max {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::FileTooLarge,
-                "response exceeds the byte cap",
-            ));
-        }
-        buf.extend_from_slice(&chunk[..read]);
+/// The wasm32 response has no chunk stream; the whole body is read and capped.
+#[cfg(target_arch = "wasm32")]
+async fn read_capped(response: reqwest::Response, max: usize) -> Result<Vec<u8>, String> {
+    let bytes = response.bytes().await.map_err(|err| err.to_string())?;
+    if exceeds_cap(0, bytes.len(), max) {
+        return Err("cap".to_string());
     }
+    Ok(bytes.to_vec())
+}
+
+fn exceeds_cap(buf_len: usize, chunk_len: usize, max: usize) -> bool {
+    buf_len + chunk_len > max
 }
 
 fn fetch_err(url: &Url, err: reqwest::Error) -> Error {
@@ -113,25 +126,25 @@ fn fetch_err(url: &Url, err: reqwest::Error) -> Error {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn stderr_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stderr().is_terminal()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn stderr_is_terminal() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
-    use super::read_capped;
-    use std::io::{self, Read};
-
-    struct FailRead;
-
-    impl Read for FailRead {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::ConnectionReset, "reset"))
-        }
-    }
+    use super::exceeds_cap;
 
     #[test]
-    fn short_read_is_io_and_overflow_is_the_cap() {
-        let err = read_capped(FailRead, 100).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
-
-        let err = read_capped(std::io::Cursor::new(vec![1u8, 2, 3, 4]), 3).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::FileTooLarge);
+    fn cap_counts_the_incoming_chunk() {
+        assert!(!exceeds_cap(0, 100, 100));
+        assert!(exceeds_cap(1, 100, 100));
+        assert!(exceeds_cap(0, 101, 100));
     }
 }

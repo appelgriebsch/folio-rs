@@ -62,6 +62,15 @@ The table of contents has two levels. A single title heading is the chapter, and
 
 The cover is always a portrait JPEG (`images/cover.jpg`, with `cover.xhtml` first in the spine). Folio tries up to three share images, the typed page's banner first, in this order: `og:image`, then `twitter:image`, then the article's JSON-LD image. A usable image is JPEG, PNG, GIF, or WebP and at least 400 px wide. A landscape or square image sits near the top on a solid fill: the image's dominant colour darkened for white text, or off-white with black text when the image is flat and light. If none can be used, the cover is typographic: the title in IBM Plex Serif on a dark colour chosen from the host name. A title the font cannot draw, or that needs shaping (Arabic, Hebrew, Thai, and similar scripts), is replaced by the site name. Each image that cannot be used is omitted with a warning, and the EPUB is still written.
 
+## Web service (Cloudflare Workers)
+
+The `worker/` directory is a [workers-rs](https://github.com/cloudflare/workers-rs)
+service that exposes the same pipeline over HTTP: pass `sourceUrl` and
+`format` (`epub` or `pdf`) and it returns the generated file for download.
+EPUB is rendered in-process; PDF is rendered from the composed article through
+the account's Browser Rendering binding. See [worker/README.md](worker/README.md)
+for the API and deploy steps.
+
 ## License
 
 MIT.

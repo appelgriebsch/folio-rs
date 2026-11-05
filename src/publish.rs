@@ -8,78 +8,66 @@ use rbook::epub::manifest::DetachedEpubManifestEntry;
 use rbook::epub::metadata::EpubVersion;
 use rbook::epub::toc::DetachedEpubTocEntry;
 
-use crate::cover::{self, Cover};
+use crate::cover;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::article::{extract_article, fragment_has_text};
-use crate::cli::{Format, Options};
 use crate::error::Error;
-use crate::fetch::{self, Page, client};
+use crate::fetch::{self, Page};
+use crate::format::Format;
 use crate::images::{self, ImageWarnings};
-use crate::meta::{self, read_meta_doc};
-use crate::output::{self, TempFile};
-use crate::pdf::{self, PdfMeta};
+use crate::meta::read_meta_doc;
 use crate::reader::{self, ReaderScan};
 use crate::sanitize;
+use crate::service::Composed;
 use crate::toc::{self, Section};
 use crate::xhtml;
 
-struct Composed {
-    title: String,
-    meta: meta::PageMeta,
-    xhtml: String,
-    /// Sanitized HTML with image hrefs, before the EPUB XHTML wrapper.
-    anchored: String,
-    images: Vec<images::EmbeddedImage>,
-    outline: Vec<Section>,
-    /// Absent for PDF. That format has no cover and does not fetch share images.
-    cover: Option<Cover>,
-}
+#[cfg(not(target_arch = "wasm32"))]
+use crate::cli::Options;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::output::{self, TempFile};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::pdf::{self, PdfMeta};
 
 const MAX_COVER_CANDIDATES: usize = 3;
 
 /// This ticket fetches one page. `max_pages` is validated by the CLI and kept for later tickets.
+#[cfg(not(target_arch = "wasm32"))]
 fn pages_fetched(max_pages: u8) -> u8 {
     let _ = max_pages;
     1
 }
 
-pub fn publish(opts: Options) -> Result<std::path::PathBuf, Error> {
+/// CLI entry point: render in memory, then write the file atomically.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn publish(opts: Options) -> Result<std::path::PathBuf, Error> {
     let _single_page = pages_fetched(opts.max_pages);
-    let typed = crate::cli::require_http_url(&opts.url)?;
     let explicit = output::prepare_explicit_output(&opts)?;
     let format = output::agree_format(opts.format, explicit.as_deref())?;
-    let http = client()?;
-    let page = fetch::fetch_html(&http, &typed, opts.verbose)?;
-    let composed = choose_source(&http, &page, &typed, format, opts.verbose)?;
+    let rendered = crate::service::render(crate::service::RenderRequest {
+        url: opts.url.clone(),
+        format,
+        verbose: opts.verbose,
+    })
+    .await?;
     let output = match explicit {
         Some(path) => path,
-        None => output::path_from_title(&composed.title, &opts)?,
+        None => output::path_from_title(&rendered.title, &opts)?,
     };
     let temp = TempFile::new(&output)?;
-    match format {
-        Format::Epub => write_epub(
-            &temp,
-            &composed.title,
-            &composed.meta,
-            &composed.xhtml,
-            &composed.images,
-            &composed.outline,
-            composed
-                .cover
-                .as_ref()
-                .expect("epub compose builds a cover"),
-        )?,
-        Format::Pdf => write_pdf(&temp, &composed)?,
-    }
+    std::fs::write(temp.path(), &rendered.bytes).map_err(|err| Error::Write(err.to_string()))?;
     temp.persist(&output)?;
     Ok(output)
 }
 
-fn write_pdf(temp: &TempFile, composed: &Composed) -> Result<(), Error> {
+/// Bytes of the PDF of the composed article. Native builds render with
+/// printpdf; wasm32 builds cannot and return `Error::Unsupported`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn pdf_bytes(composed: &Composed) -> Result<Vec<u8>, Error> {
     let (body, images) = pdf::article_xhtml(&composed.anchored, &composed.images);
-    let bytes = pdf::render(
+    pdf::render(
         &body,
         &images,
         &PdfMeta {
@@ -87,12 +75,11 @@ fn write_pdf(temp: &TempFile, composed: &Composed) -> Result<(), Error> {
             meta: &composed.meta,
             file_time: std::time::SystemTime::now(),
         },
-    )?;
-    std::fs::write(temp.path(), bytes).map_err(|err| Error::Write(err.to_string()))
+    )
 }
 
-fn choose_source(
-    http: &reqwest::blocking::Client,
+pub(crate) async fn choose_source(
+    http: &reqwest::Client,
     page: &Page,
     typed: &url::Url,
     format: Format,
@@ -108,24 +95,24 @@ fn choose_source(
         )
     };
     if verbose {
-        eprintln!("{}", scan.verbose_line());
+        crate::log_line(&scan.verbose_line());
         if format == Format::Pdf {
-            eprintln!("{}", reader::print_verbose_line(&print));
+            crate::log_line(&reader::print_verbose_line(&print));
         }
     }
     // ponytail: issue #3 appends rel=next on the document this function returns
     if format == Format::Pdf
         && let reader::PrintScan::One(print_url) = print
     {
-        match fetch::fetch_html(http, &print_url, verbose) {
-            Ok(print_page) => match compose(http, &print_page, typed, &site_banners, format) {
+        match fetch::fetch_html(http, &print_url, verbose).await {
+            Ok(print_page) => match compose(http, &print_page, typed, &site_banners, format).await {
                 Ok(composed) => return Ok(composed),
                 Err(err) => warn_print(&print_url, &err),
             },
             Err(err) => warn_print(&print_url, &err),
         }
     }
-    choose_article(http, page, typed, &scan, &site_banners, verbose, format)
+    choose_article(http, page, typed, &scan, &site_banners, verbose, format).await
 }
 
 fn warn_print(print_url: &url::Url, err: &Error) {
@@ -134,13 +121,15 @@ fn warn_print(print_url: &url::Url, err: &Error) {
         Error::MissingTitle(_) => "missing title".to_string(),
         _ => "failed".to_string(),
     });
-    eprintln!("warning: print view failed ({print_url}, {status}); used the article page");
+    crate::log_line(&format!(
+        "warning: print view failed ({print_url}, {status}); used the article page"
+    ));
 }
 
 /// Issue #3 walks continuation pages on this document. It is not merged, so the
 /// chosen page is the whole article.
-fn choose_article(
-    http: &reqwest::blocking::Client,
+async fn choose_article(
+    http: &reqwest::Client,
     page: &Page,
     typed: &url::Url,
     scan: &ReaderScan,
@@ -149,19 +138,21 @@ fn choose_article(
     format: Format,
 ) -> Result<Composed, Error> {
     match scan {
-        ReaderScan::One(hit) => match fetch::fetch_html(http, &hit.url, verbose) {
-            Ok(reader_page) => match compose(http, &reader_page, typed, site_banners, format) {
-                Ok(composed) => Ok(composed),
-                Err(err) => fallback(http, page, typed, &hit.url, err, format),
-            },
-            Err(err) => fallback(http, page, typed, &hit.url, err, format),
+        ReaderScan::One(hit) => match fetch::fetch_html(http, &hit.url, verbose).await {
+            Ok(reader_page) => {
+                match compose(http, &reader_page, typed, site_banners, format).await {
+                    Ok(composed) => Ok(composed),
+                    Err(err) => fallback(http, page, typed, &hit.url, err, format).await,
+                }
+            }
+            Err(err) => fallback(http, page, typed, &hit.url, err, format).await,
         },
-        ReaderScan::None | ReaderScan::Several => compose(http, page, typed, &[], format),
+        ReaderScan::None | ReaderScan::Several => compose(http, page, typed, &[], format).await,
     }
 }
 
-fn fallback(
-    http: &reqwest::blocking::Client,
+async fn fallback(
+    http: &reqwest::Client,
     page: &Page,
     typed: &url::Url,
     reader_url: &url::Url,
@@ -170,17 +161,17 @@ fn fallback(
 ) -> Result<Composed, Error> {
     match reader::failure_status(&err) {
         Some(status) => {
-            eprintln!(
+            crate::log_line(&format!(
                 "warning: reader view failed ({reader_url}, {status}); used the article page"
-            );
-            compose(http, page, typed, &[], format)
+            ));
+            compose(http, page, typed, &[], format).await
         }
         None => Err(err),
     }
 }
 
-fn compose(
-    http: &reqwest::blocking::Client,
+pub(crate) async fn compose(
+    http: &reqwest::Client,
     page: &Page,
     typed: &url::Url,
     site_banners: &[String],
@@ -215,10 +206,10 @@ fn compose(
     }
     let mut warnings = ImageWarnings::default();
     // PDF has no cover page, so share images are not fetched and not warned about.
-    let cover = (format == Format::Epub).then(|| {
+    let cover = if format == Format::Epub {
         let mut image = None;
         for url in cover_urls(site_banners, &meta.banners) {
-            match images::download_cover(http, &url) {
+            match images::download_cover(http, &url).await {
                 Some(decoded) => {
                     image = Some(decoded);
                     break;
@@ -227,9 +218,11 @@ fn compose(
             }
         }
         let host = typed.host_str().unwrap_or("");
-        cover::make_cover(image, &title, host)
-    });
-    let (with_images, embedded) = images::download_images(&cleaned, http, &mut warnings);
+        Some(cover::make_cover(image, &title, host))
+    } else {
+        None
+    };
+    let (with_images, embedded) = images::download_images(&cleaned, http, &mut warnings).await;
     warnings.emit();
     let (anchored, outline) = toc::anchor_outline(&with_images);
     let xhtml = xhtml::to_xhtml(&anchored, &meta.language, &title);
@@ -244,15 +237,10 @@ fn compose(
     })
 }
 
-fn write_epub(
-    temp: &TempFile,
-    title: &str,
-    meta: &crate::meta::PageMeta,
-    xhtml_doc: &str,
-    images: &[images::EmbeddedImage],
-    outline: &[Section],
-    cover: &Cover,
-) -> Result<(), Error> {
+/// Bytes of the EPUB of the composed article.
+pub(crate) fn epub_bytes(composed: &Composed) -> Result<Vec<u8>, Error> {
+    let title = &composed.title;
+    let meta = &composed.meta;
     let mut editor = Epub::builder()
         .identifier(meta.identifier.as_str())
         .title(title)
@@ -267,7 +255,7 @@ fn write_epub(
     if let Some(published) = &meta.published {
         editor = editor.published_date(published.as_str());
     }
-    for (index, image) in images.iter().enumerate() {
+    for (index, image) in composed.images.iter().enumerate() {
         editor = editor.resource(
             DetachedEpubManifestEntry::new(format!("img{}", index + 1))
                 .href(image.href.as_str())
@@ -279,7 +267,14 @@ fn write_epub(
         DetachedEpubManifestEntry::new("cover")
             .href("images/cover.jpg")
             .media_type("image/jpeg")
-            .content(cover.bytes.clone()),
+            .content(
+                composed
+                    .cover
+                    .as_ref()
+                    .expect("epub compose builds a cover")
+                    .bytes
+                    .clone(),
+            ),
     );
     let cover_page = EpubChapter::unlisted("cover.xhtml")
         .with_manifest_entry(
@@ -287,11 +282,17 @@ fn write_epub(
                 .href("cover.xhtml")
                 .property("svg"),
         )
-        .xhtml(cover_document(cover.width, cover.height).into_bytes());
+        .xhtml(
+            cover_document(
+                composed.cover.as_ref().expect("epub compose builds a cover").width,
+                composed.cover.as_ref().expect("epub compose builds a cover").height,
+            )
+            .into_bytes(),
+        );
     let chapter = EpubChapter::new(title)
         .href("chapter.xhtml")
-        .with_toc_entry(contents_entry(title, outline))
-        .xhtml(xhtml_doc.as_bytes().to_vec());
+        .with_toc_entry(contents_entry(title, &composed.outline))
+        .xhtml(composed.xhtml.as_bytes().to_vec());
     editor = editor.chapter([cover_page, chapter]);
     let mut epub = editor.build();
     epub.toc_mut().insert_root(
@@ -311,8 +312,7 @@ fn write_epub(
     if meta.published.is_none() {
         bytes = strip_generated_dc_date(bytes)?;
     }
-    std::fs::write(temp.path(), bytes).map_err(|err| Error::Write(err.to_string()))?;
-    Ok(())
+    Ok(bytes)
 }
 
 fn cover_urls(preferred: &[String], page: &[String]) -> Vec<String> {
