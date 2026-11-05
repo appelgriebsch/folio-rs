@@ -1,8 +1,8 @@
 # folio
 
-`folio` fetches one web article and writes an EPUB.
+`folio` fetches one web article and writes an EPUB or a PDF.
 
-It reads the HTML the server returns. It does not run JavaScript, log in, or follow a chain of next pages. The file on stdout is the path of the EPUB. Warnings go to stderr, and a warning still exits 0.
+It reads the HTML the server returns. It does not run JavaScript, log in, or follow a chain of next pages. The file on stdout is the path of the file. Warnings go to stderr, and a warning still exits 0.
 
 ## Build
 
@@ -21,12 +21,12 @@ The binary is named `folio`.
 folio https://example.com/story
 ```
 
-With no output path, the file is `./<title>.epub` in the current directory. The name comes from the article title: letters and numbers stay, other runs become hyphens, and the result is lowercased.
+With no output path, the file is `./<title>.epub` in the current directory, or `./<title>.pdf` when the format is PDF. The name comes from the article title: letters and numbers stay, other runs become hyphens, and the result is lowercased. If `--format` is omitted and `-o` ends in `.pdf` or `.epub`, that extension picks the format. A flag that disagrees with that extension exits 2 and writes nothing.
 
 ```sh
 folio -o out/story.epub https://example.com/story
 folio -o story.epub --force https://example.com/story
-folio --format epub -v https://example.com/story
+folio --format pdf -v https://example.com/story
 ```
 
 `-o` may be written as `-ostory.epub`. `--format` needs two dashes. `-f` is `--force`, not the format.
@@ -35,12 +35,22 @@ folio --format epub -v https://example.com/story
 | --- | --- |
 | URL | `http` or `https` article address. Required. |
 | `-o`, `--output` PATH | Output file. `-` is rejected. The parent directory must already exist. |
-| `-f`, `--force` | Replace an existing output file after the new EPUB is complete. |
-| `--format epub` | Output format. EPUB is the only format. A `.pdf` path is rejected. |
+| `-f`, `--force` | Replace an existing output file after the new file is complete. |
+| `--format pdf\|epub` | Output format. Default `epub`. `.pdf` and `.epub` paths must agree with the flag. |
 | `--max-pages` N | Accepted, from 1 to 15, default 15. This version still fetches one page. |
-| `-v`, `--verbose` | Print the fetch line even when stderr is not a terminal. |
+| `-v`, `--verbose` | Print the fetch line even when stderr is not a terminal, and why a reader or print link was chosen. |
 
 Exit 2 means the command line or the URL was rejected. Exit 1 means the fetch, the article, or the write failed. If the page has no article text, folio says that it only reads the fetched HTML and does not run JavaScript.
+
+## What the PDF contains
+
+`--format pdf` writes one A4 PDF (210×297 mm, 20 mm margins) of the same article. It starts with the title, then the byline and date when the page has them, then the body. There is no cover page. Text is IBM Plex Serif, bundled with the program.
+
+When the article page has exactly one same-origin print link, the PDF is built from that page and the EPUB is not. The link's accessible name, as a whole string, is one of: print, print article, print this article, print version, printable version, printer-friendly, printer friendly, print view, Druckansicht, Druckversion. A path segment may be exactly `print`, `printable`, or `printer-friendly`. A failed print fetch warns and uses the article page. A `media="print"` stylesheet is not applied.
+
+The info dictionary carries the title, the author, and the description as the subject. The creation date is the article's publish date when the page has one. A date-only value is midnight UTC. A timestamp keeps its offset. With no publish date, the creation date is the file time, and the modification date is always the file time.
+
+JPEG, PNG, and GIF images are embedded. An SVG is omitted with a warning and the PDF is still written.
 
 ## What the EPUB contains
 
