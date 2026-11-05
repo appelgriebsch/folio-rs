@@ -267,6 +267,20 @@ const PRINT_NAMES: [&str; 10] = [
 
 const PRINT_SEGMENTS: [&str; 3] = ["print", "printable", "printer-friendly"];
 
+/// Asset and hint relations. `icon` also covers `shortcut icon`.
+const SKIP_LINK_RELS: [&str; 10] = [
+    "stylesheet",
+    "icon",
+    "apple-touch-icon",
+    "apple-touch-icon-precomposed",
+    "mask-icon",
+    "preload",
+    "prefetch",
+    "modulepreload",
+    "dns-prefetch",
+    "preconnect",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrintScan {
     None,
@@ -304,6 +318,9 @@ pub fn print_verbose_line(found: &PrintScan) -> String {
 }
 
 fn print_candidate(node: NodeRef<'_>, base: &Url) -> Option<Url> {
+    if skipped_link(&node) {
+        return None;
+    }
     let href = attr(&node, "href")?;
     if fragment_only(&href) {
         return None;
@@ -324,6 +341,18 @@ fn print_candidate(node: NodeRef<'_>, base: &Url) -> Option<Url> {
 fn print_name_matches(name: &str) -> bool {
     let folded = collapse_ws(&name.to_ascii_lowercase());
     PRINT_NAMES.iter().any(|label| *label == folded)
+}
+
+fn skipped_link(node: &NodeRef<'_>) -> bool {
+    node.node_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("link"))
+        && attr(node, "rel").is_some_and(|rel| {
+            rel.split_whitespace().any(|token| {
+                SKIP_LINK_RELS
+                    .iter()
+                    .any(|skip| token.eq_ignore_ascii_case(skip))
+            })
+        })
 }
 
 fn print_path_matches(url: &Url) -> bool {
@@ -611,6 +640,42 @@ mod tests {
             panic!("the same print url twice is one link");
         };
         assert_eq!(twice.as_str(), "http://example.com/print");
+    }
+
+    fn scan_print(html: &str) -> PrintScan {
+        find_print_link(
+            &Document::from(html),
+            &Url::parse("http://example.com/news/article").unwrap(),
+        )
+    }
+
+    #[test]
+    fn stylesheet_beside_a_real_print_link_keeps_that_link() {
+        let both = scan_print(
+            r#"<link rel=stylesheet media=print href=/assets/print/site.css><a href="/p">Print version</a>"#,
+        );
+        let PrintScan::One(url) = both else {
+            panic!("real print link should be chosen, got {both:?}");
+        };
+        assert_eq!(url.as_str(), "http://example.com/p");
+    }
+
+    #[test]
+    fn stylesheet_alone_is_not_a_print_link() {
+        let sheet = scan_print(r#"<link rel=stylesheet media=print href=/assets/print/site.css>"#);
+        assert!(matches!(sheet, PrintScan::None), "{sheet:?}");
+    }
+
+    #[test]
+    fn stylesheet_rel_match_is_case_insensitive() {
+        let folded = scan_print(r#"<link rel="StyleSheet" href="/assets/print/site.css">"#);
+        assert!(matches!(folded, PrintScan::None), "{folded:?}");
+    }
+
+    #[test]
+    fn shortcut_icon_under_a_print_path_is_not_a_print_link() {
+        let icon = scan_print(r#"<link rel="shortcut icon" href="/print/favicon.ico">"#);
+        assert!(matches!(icon, PrintScan::None), "{icon:?}");
     }
 
     #[test]
