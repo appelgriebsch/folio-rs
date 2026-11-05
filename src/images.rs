@@ -1,8 +1,6 @@
-use std::io::Read;
-
 use dom_query::{Document, NodeRef};
 use image::ImageFormat;
-use reqwest::blocking::Client;
+use reqwest::Client;
 use url::Url;
 
 pub const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
@@ -28,11 +26,11 @@ impl ImageWarnings {
     pub fn emit(&self) {
         let show = self.urls.len().min(10);
         for url in &self.urls[..show] {
-            eprintln!("warning: omitted image {url}");
+            crate::log_line(&format!("warning: omitted image {url}"));
         }
         let rest = self.urls.len().saturating_sub(10);
         if rest > 0 {
-            eprintln!("warning: omitted {rest} more images");
+            crate::log_line(&format!("warning: omitted {rest} more images"));
         }
     }
 }
@@ -465,12 +463,12 @@ fn inside_picture(node: &NodeRef<'_>) -> bool {
 /// Fetch one http(s) or data image and decode it for the cover.
 /// Unusable: fetch error, SVG, AVIF, undecodable bytes, or width under 400 px.
 /// GIF contributes its first frame. WebP is decoded.
-pub fn download_cover(client: &Client, url: &str) -> Option<image::DynamicImage> {
-    let (mime, bytes) = load_image_bytes(client, url).ok()?;
+pub async fn download_cover(client: &Client, url: &str) -> Option<image::DynamicImage> {
+    let (mime, bytes) = load_image_bytes(client, url).await.ok()?;
     decode_cover(&bytes, mime.as_deref())
 }
 
-pub fn download_images(
+pub async fn download_images(
     html: &str,
     client: &Client,
     warnings: &mut ImageWarnings,
@@ -489,7 +487,7 @@ pub fn download_images(
             img.remove_from_parent();
             continue;
         }
-        match first_embedded(client, &urls, &mut cache, &mut embedded, warnings) {
+        match first_embedded(client, &urls, &mut cache, &mut embedded, warnings).await {
             Some(href) => img.set_attr("src", &href),
             None => img.remove_from_parent(),
         }
@@ -497,7 +495,7 @@ pub fn download_images(
     (doc.tree.root().inner_html().to_string(), embedded)
 }
 
-fn first_embedded(
+async fn first_embedded(
     client: &Client,
     urls: &[String],
     cache: &mut Vec<(String, Option<String>)>,
@@ -511,7 +509,7 @@ fn first_embedded(
             }
             continue;
         }
-        match fetch_image(client, url, embedded.len() + 1) {
+        match fetch_image(client, url, embedded.len() + 1).await {
             Ok(asset) => {
                 let href = asset.href.clone();
                 embedded.push(asset);
@@ -525,8 +523,8 @@ fn first_embedded(
     None
 }
 
-fn fetch_image(client: &Client, url: &str, index: usize) -> Result<EmbeddedImage, ()> {
-    let (mime, bytes) = load_image_bytes(client, url)?;
+async fn fetch_image(client: &Client, url: &str, index: usize) -> Result<EmbeddedImage, ()> {
+    let (mime, bytes) = load_image_bytes(client, url).await?;
     let accepted = accept_image(&bytes, mime.as_deref()).ok_or(())?;
     Ok(EmbeddedImage {
         href: format!("images/img-{index}.{}", accepted.extension),
@@ -535,7 +533,7 @@ fn fetch_image(client: &Client, url: &str, index: usize) -> Result<EmbeddedImage
     })
 }
 
-fn load_image_bytes(client: &Client, url: &str) -> Result<(Option<String>, Vec<u8>), ()> {
+async fn load_image_bytes(client: &Client, url: &str) -> Result<(Option<String>, Vec<u8>), ()> {
     if url.starts_with("data:") {
         return decode_data_url(url).ok_or(());
     }
@@ -543,7 +541,7 @@ fn load_image_bytes(client: &Client, url: &str) -> Result<(Option<String>, Vec<u
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(());
     }
-    let response = client.get(parsed).send().map_err(|_| ())?;
+    let response = client.get(parsed).send().await.map_err(|_| ())?;
     if !response.status().is_success() {
         return Err(());
     }
@@ -558,7 +556,7 @@ fn load_image_bytes(client: &Client, url: &str) -> Result<(Option<String>, Vec<u
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.split(';').next().unwrap_or("").trim().to_string());
-    let bytes = read_capped(response, MAX_IMAGE_BYTES)?;
+    let bytes = read_capped(response, MAX_IMAGE_BYTES).await?;
     Ok((mime, bytes))
 }
 
@@ -919,19 +917,33 @@ fn percent_decode(input: &str) -> Vec<u8> {
     out
 }
 
-fn read_capped(mut response: reqwest::blocking::Response, max: usize) -> Result<Vec<u8>, ()> {
+/// Native responses stream chunk by chunk so the cap stops the read early.
+#[cfg(not(target_arch = "wasm32"))]
+async fn read_capped(mut response: reqwest::Response, max: usize) -> Result<Vec<u8>, ()> {
     let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let read = response.read(&mut chunk).map_err(|_| ())?;
-        if read == 0 {
-            return Ok(buf);
-        }
-        if buf.len() + read > max {
+    while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
+        if buf.len() + chunk.len() > max {
             return Err(());
         }
-        buf.extend_from_slice(&chunk[..read]);
+        buf.extend_from_slice(&chunk);
     }
+    Ok(buf)
+}
+
+/// The wasm32 response has no chunk stream, so the body cannot be capped
+/// mid-read. Fail closed unless the server declares a Content-Length within
+/// the cap; a missing or oversized header is rejected before reading.
+#[cfg(target_arch = "wasm32")]
+async fn read_capped(response: reqwest::Response, max: usize) -> Result<Vec<u8>, ()> {
+    match response.content_length() {
+        Some(len) if len <= max as u64 => {}
+        _ => return Err(()),
+    }
+    let bytes = response.bytes().await.map_err(|_| ())?;
+    if bytes.len() > max {
+        return Err(());
+    }
+    Ok(bytes.to_vec())
 }
 
 fn name_is(node: &NodeRef<'_>, name: &str) -> bool {

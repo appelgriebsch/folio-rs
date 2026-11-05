@@ -594,7 +594,7 @@ mod tests {
             "Druckansicht",
             "druckversion",
         ] {
-            let html = format!(r#"<a href="/p">{}</a>"#, label);
+            let html = format!(r#"<a href="/p">{label}</a>"#);
             let scan = find_print_link(&Document::from(html.as_str()), &Url::parse(BASE).unwrap());
             let PrintScan::One(url) = scan else {
                 panic!("{label} should be one print link, got {scan:?}");

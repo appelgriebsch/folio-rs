@@ -1,0 +1,9 @@
+name = "folio"
+main = "build/worker/shim.js"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# PDF output is rendered from the composed article by a headless browser.
+# Requires the Browser Rendering product on the account.
+[browser]
+binding = "BROWSER"

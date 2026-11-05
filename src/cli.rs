@@ -2,19 +2,19 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 
-use crate::error::Error;
+use crate::format::Format;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Format {
+enum CliFormat {
     Epub,
     Pdf,
 }
 
-impl Format {
-    pub fn extension(self) -> &'static str {
-        match self {
-            Format::Epub => "epub",
-            Format::Pdf => "pdf",
+impl From<CliFormat> for Format {
+    fn from(value: CliFormat) -> Self {
+        match value {
+            CliFormat::Epub => Format::Epub,
+            CliFormat::Pdf => Format::Pdf,
         }
     }
 }
@@ -33,7 +33,7 @@ struct Cli {
 
     /// Output format. Long-only so -f stays force. `pdf` or `epub`.
     #[arg(long, value_enum)]
-    format: Option<Format>,
+    format: Option<CliFormat>,
 
     /// Output path. `-` is rejected.
     #[arg(short, long, value_name = "PATH")]
@@ -71,7 +71,7 @@ pub fn parse() -> Result<Options, i32> {
     match Cli::try_parse() {
         Ok(cli) => Ok(Options {
             url: cli.url,
-            format: cli.format,
+            format: cli.format.map(Format::from),
             output: cli.output,
             force: cli.force,
             max_pages: cli.max_pages,
@@ -122,17 +122,6 @@ pub(crate) fn shorts_are_only_f_v_or_o(args: &[String]) -> bool {
         index += 1;
     }
     true
-}
-
-pub fn require_http_url(raw: &str) -> Result<url::Url, Error> {
-    let url = url::Url::parse(raw).map_err(|_| Error::Usage(format!("invalid url: {raw}")))?;
-    if url.scheme() != "http" && url.scheme() != "https" {
-        return Err(Error::Usage("url must use http or https".to_string()));
-    }
-    if url.host_str().is_none() {
-        return Err(Error::Usage(format!("invalid url: {raw}")));
-    }
-    Ok(url)
 }
 
 #[cfg(test)]

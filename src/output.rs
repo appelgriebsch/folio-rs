@@ -2,8 +2,9 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::cli::{Format, Options};
+use crate::cli::Options;
 use crate::error::Error;
+use crate::format::Format;
 use crate::slug::slug_from_title;
 
 static TEMP_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);

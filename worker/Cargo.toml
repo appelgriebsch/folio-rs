@@ -1,0 +1,28 @@
+[package]
+name = "folio-worker"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "HTTP front end for folio: sourceUrl + format in, EPUB or PDF download out"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Standalone crate: the repository root package is not a workspace.
+[workspace]
+
+[dependencies]
+folio-rs = { path = ".." }
+worker = "0.6"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+[profile.release]
+opt-level = "s"
+lto = true

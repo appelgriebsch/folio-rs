@@ -40,6 +40,9 @@ pub enum Error {
 
     #[error("failed to write the file: {0}")]
     Write(String),
+
+    #[error("not available in this build: {0}")]
+    Unsupported(String),
 }
 
 impl Error {
