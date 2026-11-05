@@ -1220,6 +1220,37 @@ fn a_missing_print_view_falls_back_and_svg_is_skipped() {
 }
 
 #[test]
+fn pdf_does_not_fetch_cover_candidates_and_epub_still_does() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/dead-covers", server.base);
+    let before = server.miss_hits.load(Ordering::SeqCst);
+    let pdf = folio(&dir, &["--format", "pdf", "-o", "dead.pdf", &url]);
+    assert_eq!(pdf.status, 0, "stderr={}", pdf.stderr);
+    assert_eq!(server.miss_hits.load(Ordering::SeqCst), before);
+    assert!(
+        !pdf.stderr.contains("omitted image") && !pdf.stderr.contains("missing-"),
+        "{}",
+        pdf.stderr
+    );
+    let text = pdf::pdf_text(&std::fs::read(dir.join("dead.pdf")).unwrap());
+    assert!(text.contains("DEAD_COVER_MARKER"), "{text}");
+
+    let epub = folio(&dir, &["-o", "dead.epub", &url]);
+    assert_eq!(epub.status, 0, "stderr={}", epub.stderr);
+    assert!(
+        epub.stderr.contains(&format!(
+            "warning: omitted image {}/missing-a.png",
+            server.base
+        )),
+        "{}",
+        epub.stderr
+    );
+    assert!(server.miss_hits.load(Ordering::SeqCst) > before);
+    assert_cover_page(&open_epub(&dir.join("dead.epub")), 1600, 2560);
+}
+
+#[test]
 fn a_pdf_flag_and_an_epub_path_write_nothing() {
     let server = Server::start();
     let dir = workdir();

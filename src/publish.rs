@@ -33,7 +33,8 @@ struct Composed {
     anchored: String,
     images: Vec<images::EmbeddedImage>,
     outline: Vec<Section>,
-    cover: Cover,
+    /// Absent for PDF. That format has no cover and does not fetch share images.
+    cover: Option<Cover>,
 }
 
 const MAX_COVER_CANDIDATES: usize = 3;
@@ -65,7 +66,10 @@ pub fn publish(opts: Options) -> Result<std::path::PathBuf, Error> {
             &composed.xhtml,
             &composed.images,
             &composed.outline,
-            &composed.cover,
+            composed
+                .cover
+                .as_ref()
+                .expect("epub compose builds a cover"),
         )?,
         Format::Pdf => write_pdf(&temp, &composed)?,
     }
@@ -114,7 +118,7 @@ fn choose_source(
         && let reader::PrintScan::One(print_url) = print
     {
         match fetch::fetch_html(http, &print_url, verbose) {
-            Ok(print_page) => match compose(http, &print_page, typed, &site_banners) {
+            Ok(print_page) => match compose(http, &print_page, typed, &site_banners, format) {
                 Ok(composed) => return Ok(composed),
                 Err(err) if reader::failure_status(&err).is_some() => {
                     warn_print(&print_url, &err);
@@ -125,7 +129,7 @@ fn choose_source(
             Err(err) => return Err(err),
         }
     }
-    choose_article(http, page, typed, &scan, &site_banners, verbose)
+    choose_article(http, page, typed, &scan, &site_banners, verbose, format)
 }
 
 fn warn_print(print_url: &url::Url, err: &Error) {
@@ -142,16 +146,17 @@ fn choose_article(
     scan: &ReaderScan,
     site_banners: &[String],
     verbose: bool,
+    format: Format,
 ) -> Result<Composed, Error> {
     match scan {
         ReaderScan::One(hit) => match fetch::fetch_html(http, &hit.url, verbose) {
-            Ok(reader_page) => match compose(http, &reader_page, typed, site_banners) {
+            Ok(reader_page) => match compose(http, &reader_page, typed, site_banners, format) {
                 Ok(composed) => Ok(composed),
-                Err(err) => fallback(http, page, typed, &hit.url, err),
+                Err(err) => fallback(http, page, typed, &hit.url, err, format),
             },
-            Err(err) => fallback(http, page, typed, &hit.url, err),
+            Err(err) => fallback(http, page, typed, &hit.url, err, format),
         },
-        ReaderScan::None | ReaderScan::Several => compose(http, page, typed, &[]),
+        ReaderScan::None | ReaderScan::Several => compose(http, page, typed, &[], format),
     }
 }
 
@@ -161,13 +166,14 @@ fn fallback(
     typed: &url::Url,
     reader_url: &url::Url,
     err: Error,
+    format: Format,
 ) -> Result<Composed, Error> {
     match reader::failure_status(&err) {
         Some(status) => {
             eprintln!(
                 "warning: reader view failed ({reader_url}, {status}); used the article page"
             );
-            compose(http, page, typed, &[])
+            compose(http, page, typed, &[], format)
         }
         None => Err(err),
     }
@@ -178,6 +184,7 @@ fn compose(
     page: &Page,
     typed: &url::Url,
     site_banners: &[String],
+    format: Format,
 ) -> Result<Composed, Error> {
     let doc = Document::from(page.html.as_str());
     let meta = read_meta_doc(&doc, &page.response_url, typed);
@@ -207,18 +214,21 @@ fn compose(
         });
     }
     let mut warnings = ImageWarnings::default();
-    let mut image = None;
-    for url in cover_urls(site_banners, &meta.banners) {
-        match images::download_cover(http, &url) {
-            Some(decoded) => {
-                image = Some(decoded);
-                break;
+    // PDF has no cover page, so share images are not fetched and not warned about.
+    let cover = (format == Format::Epub).then(|| {
+        let mut image = None;
+        for url in cover_urls(site_banners, &meta.banners) {
+            match images::download_cover(http, &url) {
+                Some(decoded) => {
+                    image = Some(decoded);
+                    break;
+                }
+                None => warnings.push(&url),
             }
-            None => warnings.push(&url),
         }
-    }
-    let host = typed.host_str().unwrap_or("");
-    let cover = cover::make_cover(image, &title, host);
+        let host = typed.host_str().unwrap_or("");
+        cover::make_cover(image, &title, host)
+    });
     let (with_images, embedded) = images::download_images(&cleaned, http, &mut warnings);
     warnings.emit();
     let (anchored, outline) = toc::anchor_outline(&with_images);
