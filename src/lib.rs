@@ -9,7 +9,7 @@ mod fetch;
 mod images;
 mod meta;
 mod output;
-pub mod pdf;
+pub(crate) mod pdf;
 mod publish;
 mod reader;
 mod sanitize;

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use folio_rs::pdf;
+pub(crate) mod common;
 use image::ImageEncoder;
 use rbook::Epub;
 
@@ -1161,7 +1161,7 @@ fn typed_page_banner_is_tried_before_the_reader_page() {
 }
 
 fn assert_plex_only(bytes: &[u8]) {
-    let names = pdf::pdf_font_names(bytes);
+    let names = common::pdf_font_names(bytes);
     assert!(!names.is_empty(), "pdf embedded no named font");
     for name in &names {
         let lower = name.to_ascii_lowercase();
@@ -1180,7 +1180,7 @@ fn pdf_has_title_author_image_and_no_video_text() {
     assert_eq!(out.status, 0, "stderr={}", out.stderr);
     assert_eq!(out.stdout, "story.pdf\n");
     let bytes = std::fs::read(dir.join("story.pdf")).unwrap();
-    let info = pdf::pdf_info(&bytes);
+    let info = common::pdf_info(&bytes);
     assert_eq!(info.document_title, "Article Headline");
     assert_eq!(info.author, "Ada Lovelace");
     assert_eq!(info.subject, "From json-ld");
@@ -1189,10 +1189,10 @@ fn pdf_has_title_author_image_and_no_video_text() {
     assert_eq!(info.creation_date.date.day, 6);
     assert_eq!(info.creation_date.time.hour, 0);
     assert_eq!(info.creation_date.offset.hours, 0);
-    let text = pdf::pdf_text(&bytes);
+    let text = common::pdf_text(&bytes);
     assert!(text.contains("FOLIO_ARTICLE_TEXT"), "{text}");
     assert!(!text.contains("SECRET_VIDEO_PAYLOAD"), "{text}");
-    assert!(pdf::pdf_has_image(&bytes), "pdf has no image object");
+    assert!(common::pdf_has_image(&bytes), "pdf has no image object");
     assert_plex_only(&bytes);
 }
 
@@ -1212,7 +1212,7 @@ fn pdf_embeds_only_plex_when_the_article_has_cjk_and_emoji() {
     );
     let bytes = std::fs::read(dir.join("glyph.pdf")).unwrap();
     assert_plex_only(&bytes);
-    assert_eq!(pdf::pdf_info(&bytes).document_title, "東京 Headline");
+    assert_eq!(common::pdf_info(&bytes).document_title, "東京 Headline");
 }
 
 #[test]
@@ -1234,10 +1234,10 @@ fn print_page_without_a_title_falls_back_to_the_article() {
     assert!(!out.stderr.contains(&url), "{}", out.stderr);
     assert!(!out.stderr.contains("error:"), "{}", out.stderr);
     let bytes = std::fs::read(dir.join("notitle.pdf")).unwrap();
-    let text = pdf::pdf_text(&bytes);
+    let text = common::pdf_text(&bytes);
     assert!(text.contains("PRINT_NOTITLE_FALLBACK"), "{text}");
     assert!(!text.contains("BARE_PRINT_MARKER"), "{text}");
-    assert_eq!(pdf::pdf_info(&bytes).document_title, "Print Has Title");
+    assert_eq!(common::pdf_info(&bytes).document_title, "Print Has Title");
 }
 
 #[test]
@@ -1263,10 +1263,10 @@ fn print_page_without_article_text_falls_back_to_the_article() {
     assert!(!out.stderr.contains(&url), "{}", out.stderr);
     assert!(!out.stderr.contains("error:"), "{}", out.stderr);
     let bytes = std::fs::read(dir.join("notext.pdf")).unwrap();
-    let text = pdf::pdf_text(&bytes);
+    let text = common::pdf_text(&bytes);
     assert!(text.contains("PRINT_NOTEXT_FALLBACK"), "{text}");
     assert!(!text.contains("EMPTY_PRINT_MARKER"), "{text}");
-    assert_eq!(pdf::pdf_info(&bytes).document_title, "Print Has Body");
+    assert_eq!(common::pdf_info(&bytes).document_title, "Print Has Body");
 }
 
 #[test]
@@ -1283,7 +1283,7 @@ fn print_view_feeds_the_pdf_and_the_reader_feeds_the_epub() {
         "{}",
         pdf_out.stderr
     );
-    let text = pdf::pdf_text(&std::fs::read(dir.join("view.pdf")).unwrap());
+    let text = common::pdf_text(&std::fs::read(dir.join("view.pdf")).unwrap());
     assert!(text.contains("PRINT_ONLY_MARKER"), "{text}");
     assert!(!text.contains("ARTICLE_ONLY_MARKER"), "{text}");
     assert!(!text.contains("READER_ONLY_MARKER"), "{text}");
@@ -1309,7 +1309,7 @@ fn a_missing_print_view_falls_back_and_svg_is_skipped() {
         out.stderr
     );
     assert!(out.stderr.contains("404"), "{}", out.stderr);
-    let text = pdf::pdf_text(&std::fs::read(dir.join("miss.pdf")).unwrap());
+    let text = common::pdf_text(&std::fs::read(dir.join("miss.pdf")).unwrap());
     assert!(text.contains("PRINT_FALLBACK_MARKER"), "{text}");
 
     let svg_url = format!("{}/svg-article", server.base);
@@ -1320,7 +1320,7 @@ fn a_missing_print_view_falls_back_and_svg_is_skipped() {
         "{}",
         svg.stderr
     );
-    let text = pdf::pdf_text(&std::fs::read(dir.join("svg.pdf")).unwrap());
+    let text = common::pdf_text(&std::fs::read(dir.join("svg.pdf")).unwrap());
     assert!(text.contains("SVG_ARTICLE_MARKER"), "{text}");
 }
 
@@ -1338,7 +1338,7 @@ fn pdf_does_not_fetch_cover_candidates_and_epub_still_does() {
         "{}",
         pdf.stderr
     );
-    let text = pdf::pdf_text(&std::fs::read(dir.join("dead.pdf")).unwrap());
+    let text = common::pdf_text(&std::fs::read(dir.join("dead.pdf")).unwrap());
     assert!(text.contains("DEAD_COVER_MARKER"), "{text}");
 
     let epub = folio(&dir, &["-o", "dead.epub", &url]);
