@@ -1,12 +1,14 @@
 //! The web-service path: `service::render` turns one URL into file bytes in
 //! memory, which is what the Cloudflare Worker returns in the HTTP response.
+//! The Worker gates `sourceUrl` with `require_public_http_url` so it cannot
+//! fetch internal hosts; the private CLI keeps the looser `require_http_url`.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
-use folio_rs::service::{RenderRequest, render};
 use folio_rs::Format;
+use folio_rs::service::{RenderRequest, render, require_public_http_url};
 
 const ARTICLE: &str = r#"<!DOCTYPE html>
 <html lang="en">
@@ -70,7 +72,10 @@ async fn render_returns_pdf_bytes_on_native() {
     .await
     .expect("render should succeed");
     assert_eq!(rendered.file_name, "service-story.pdf");
-    assert!(rendered.bytes.starts_with(b"%PDF"), "a PDF starts with %PDF");
+    assert!(
+        rendered.bytes.starts_with(b"%PDF"),
+        "a PDF starts with %PDF"
+    );
 }
 
 #[tokio::test]
@@ -83,4 +88,23 @@ async fn render_rejects_a_non_http_url() {
     .await;
     let err = result.err().expect("ftp is not a valid article url");
     assert_eq!(err.code(), 2);
+}
+
+#[test]
+fn require_public_http_url_rejects_non_public_hosts() {
+    for raw in [
+        "http://127.0.0.1:8080/story",
+        "http://169.254.169.254/latest/meta-data",
+        "http://[::1]/story",
+        "http://10.0.0.5/story",
+        "http://192.168.1.1/story",
+        "http://localhost/story",
+        "ftp://example.com/x",
+    ] {
+        assert!(
+            require_public_http_url(raw).is_err(),
+            "{raw} must be rejected"
+        );
+    }
+    assert!(require_public_http_url("https://example.com/article").is_ok());
 }

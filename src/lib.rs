@@ -24,7 +24,7 @@ mod xhtml;
 
 pub use error::Error;
 pub use format::Format;
-pub use service::{Rendered, RenderRequest};
+pub use service::{RenderRequest, Rendered};
 
 /// Diagnostics go to stderr on native targets. On wasm32 there is no stderr,
 /// so the line is dropped; the worker surfaces errors in its HTTP response.

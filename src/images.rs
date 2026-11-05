@@ -930,9 +930,15 @@ async fn read_capped(mut response: reqwest::Response, max: usize) -> Result<Vec<
     Ok(buf)
 }
 
-/// The wasm32 response has no chunk stream; the whole body is read and capped.
+/// The wasm32 response has no chunk stream, so the body cannot be capped
+/// mid-read. Fail closed unless the server declares a Content-Length within
+/// the cap; a missing or oversized header is rejected before reading.
 #[cfg(target_arch = "wasm32")]
 async fn read_capped(response: reqwest::Response, max: usize) -> Result<Vec<u8>, ()> {
+    match response.content_length() {
+        Some(len) if len <= max as u64 => {}
+        _ => return Err(()),
+    }
     let bytes = response.bytes().await.map_err(|_| ())?;
     if bytes.len() > max {
         return Err(());

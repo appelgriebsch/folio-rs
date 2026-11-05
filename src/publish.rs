@@ -105,10 +105,12 @@ pub(crate) async fn choose_source(
         && let reader::PrintScan::One(print_url) = print
     {
         match fetch::fetch_html(http, &print_url, verbose).await {
-            Ok(print_page) => match compose(http, &print_page, typed, &site_banners, format).await {
-                Ok(composed) => return Ok(composed),
-                Err(err) => warn_print(&print_url, &err),
-            },
+            Ok(print_page) => {
+                match compose(http, &print_page, typed, &site_banners, format).await {
+                    Ok(composed) => return Ok(composed),
+                    Err(err) => warn_print(&print_url, &err),
+                }
+            }
             Err(err) => warn_print(&print_url, &err),
         }
     }
@@ -284,8 +286,16 @@ pub(crate) fn epub_bytes(composed: &Composed) -> Result<Vec<u8>, Error> {
         )
         .xhtml(
             cover_document(
-                composed.cover.as_ref().expect("epub compose builds a cover").width,
-                composed.cover.as_ref().expect("epub compose builds a cover").height,
+                composed
+                    .cover
+                    .as_ref()
+                    .expect("epub compose builds a cover")
+                    .width,
+                composed
+                    .cover
+                    .as_ref()
+                    .expect("epub compose builds a cover")
+                    .height,
             )
             .into_bytes(),
         );
