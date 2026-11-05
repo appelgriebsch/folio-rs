@@ -25,12 +25,9 @@ pub fn install_interrupt_handler() {
 /// Checks that do not need the article title. `None` means the path comes from the title.
 pub fn prepare_explicit_output(opts: &Options) -> Result<Option<PathBuf>, Error> {
     let Some(path) = opts.output.clone() else {
-        if matches!(opts.format, Some(Format::Epub) | None) {
-            return Ok(None);
-        }
-        return Err(Error::Usage("unsupported format".to_string()));
+        return Ok(None);
     };
-    validate_output_path(&path, opts, true)?;
+    validate_output_path(&path, opts)?;
     Ok(Some(path))
 }
 
@@ -39,32 +36,44 @@ pub fn path_from_title(title: &str, opts: &Options) -> Result<PathBuf, Error> {
         return Ok(path.clone());
     }
     let slug = slug_from_title(title).ok_or(Error::BadSlug)?;
-    let path = PathBuf::from(format!("./{slug}.epub"));
-    validate_output_path(&path, opts, false)?;
+    let ext = agree_format(opts.format, None)?.extension();
+    let path = PathBuf::from(format!("./{slug}.{ext}"));
+    validate_output_path(&path, opts)?;
     Ok(path)
 }
 
-fn validate_output_path(path: &Path, opts: &Options, from_flag: bool) -> Result<(), Error> {
+/// `--format` wins when the path has no `.pdf` or `.epub` extension.
+/// Those two extensions must agree with `--format`. Omitting `--format` takes the extension.
+pub fn agree_format(flag: Option<Format>, path: Option<&Path>) -> Result<Format, Error> {
+    let from_path = path.and_then(known_extension);
+    match (flag, from_path) {
+        (Some(flag), Some(from_path)) if flag != from_path => Err(Error::Usage(format!(
+            "format {} does not match output path {}",
+            flag.extension(),
+            path.expect("extension came from a path").display()
+        ))),
+        (Some(flag), _) => Ok(flag),
+        (None, Some(from_path)) => Ok(from_path),
+        (None, None) => Ok(Format::Epub),
+    }
+}
+
+fn known_extension(path: &Path) -> Option<Format> {
+    let ext = path.extension().and_then(|ext| ext.to_str())?;
+    if ext.eq_ignore_ascii_case("pdf") {
+        Some(Format::Pdf)
+    } else if ext.eq_ignore_ascii_case("epub") {
+        Some(Format::Epub)
+    } else {
+        None
+    }
+}
+
+fn validate_output_path(path: &Path, opts: &Options) -> Result<(), Error> {
     if path_is_dash(path) {
         return Err(Error::Usage("output path '-' is not supported".to_string()));
     }
-    if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-        if ext.eq_ignore_ascii_case("pdf") {
-            return Err(Error::Usage(format!(
-                "format epub does not match output path {}",
-                path.display()
-            )));
-        }
-        if from_flag && opts.format.is_none() && !ext.eq_ignore_ascii_case("epub") {
-            // No extension agreement to apply. The default format stays epub.
-        }
-        if matches!(opts.format, Some(Format::Epub)) && ext.eq_ignore_ascii_case("pdf") {
-            return Err(Error::Usage(format!(
-                "format epub does not match output path {}",
-                path.display()
-            )));
-        }
-    }
+    agree_format(opts.format, Some(path))?;
     if let Some(parent) = parent_dir(path) {
         match fs::metadata(parent) {
             Ok(meta) if meta.is_dir() => {}
@@ -174,5 +183,78 @@ impl Drop for TempFile {
         {
             *guard = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Options;
+
+    fn opts(format: Option<Format>, output: Option<&str>) -> Options {
+        Options {
+            url: "http://example.test/a".to_string(),
+            format,
+            output: output.map(PathBuf::from),
+            force: false,
+            max_pages: 15,
+            verbose: false,
+        }
+    }
+
+    #[test]
+    fn flag_and_extension_must_agree_and_the_default_name_follows_the_format() {
+        let cases = [
+            (None, None, Ok(Format::Epub)),
+            (None, Some("story.pdf"), Ok(Format::Pdf)),
+            (None, Some("story.PDF"), Ok(Format::Pdf)),
+            (None, Some("story.epub"), Ok(Format::Epub)),
+            (None, Some("story.EPUB"), Ok(Format::Epub)),
+            (None, Some("story.html"), Ok(Format::Epub)),
+            (None, Some("story"), Ok(Format::Epub)),
+            (Some(Format::Pdf), None, Ok(Format::Pdf)),
+            (Some(Format::Pdf), Some("story.pdf"), Ok(Format::Pdf)),
+            (Some(Format::Pdf), Some("story.PDF"), Ok(Format::Pdf)),
+            (Some(Format::Pdf), Some("story.html"), Ok(Format::Pdf)),
+            (Some(Format::Pdf), Some("story"), Ok(Format::Pdf)),
+            (Some(Format::Epub), None, Ok(Format::Epub)),
+            (Some(Format::Epub), Some("story.epub"), Ok(Format::Epub)),
+            (Some(Format::Epub), Some("story.html"), Ok(Format::Epub)),
+            (Some(Format::Epub), Some("story"), Ok(Format::Epub)),
+            (Some(Format::Pdf), Some("story.epub"), Err(())),
+            (Some(Format::Pdf), Some("story.EPUB"), Err(())),
+            (Some(Format::Epub), Some("story.pdf"), Err(())),
+            (Some(Format::Epub), Some("story.PDF"), Err(())),
+        ];
+        for (flag, path, expect) in cases {
+            let path = path.map(PathBuf::from);
+            let got = agree_format(flag, path.as_deref());
+            match expect {
+                Ok(format) => assert_eq!(got.unwrap(), format, "{flag:?} {path:?}"),
+                Err(()) => assert!(got.is_err(), "{flag:?} {path:?} should disagree"),
+            }
+        }
+
+        assert_eq!(
+            path_from_title("Hello", &opts(Some(Format::Pdf), None)).unwrap(),
+            PathBuf::from("./hello.pdf")
+        );
+        assert_eq!(
+            path_from_title("Hello", &opts(None, None)).unwrap(),
+            PathBuf::from("./hello.epub")
+        );
+        assert_eq!(
+            path_from_title("Hello", &opts(Some(Format::Epub), None)).unwrap(),
+            PathBuf::from("./hello.epub")
+        );
+        let mismatch = prepare_explicit_output(&opts(Some(Format::Pdf), Some("story.epub")));
+        let Err(err) = mismatch else {
+            panic!("a pdf flag and an epub path must exit 2");
+        };
+        assert_eq!(err.code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "format pdf does not match output path story.epub"
+        );
     }
 }

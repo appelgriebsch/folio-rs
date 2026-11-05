@@ -38,7 +38,7 @@ pub enum Error {
     #[error("response exceeds the byte cap for {0}")]
     TooLarge(String),
 
-    #[error("failed to write the epub: {0}")]
+    #[error("failed to write the file: {0}")]
     Write(String),
 }
 

@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
+pub(crate) mod common;
 use image::ImageEncoder;
 use rbook::Epub;
 
@@ -254,6 +255,87 @@ fn handle(
                     r#"<link rel="reader" href="/banner-reader">
                        <meta property="og:image" content="http://{host}/red.png">"#
                 ),
+            )
+        }
+        "/print-article" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            let host = host_of(&req);
+            story(
+                "Print Source",
+                "ARTICLE_ONLY_MARKER",
+                &format!(
+                    r#"<link rel="reader" href="/print-reader">
+                       <a href="/print-view">Print version</a>
+                       <meta property="og:image" content="http://{host}/red.png">"#
+                ),
+            )
+        }
+        "/print-reader" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            story("Reader Source", "READER_ONLY_MARKER", "")
+        }
+        "/print-view" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            story(
+                "Print View",
+                "PRINT_ONLY_MARKER",
+                r#"<script type="application/ld+json">
+                  {"@type":"NewsArticle","headline":"Print View","datePublished":"2024-05-06",
+                   "author":{"@type":"Person","name":"Ada Lovelace"},"description":"Printed copy"}
+                </script>"#,
+            )
+        }
+        "/print-miss" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            story(
+                "Print Miss",
+                "PRINT_FALLBACK_MARKER",
+                r#"<a href="/missing-print">Druckansicht</a>"#,
+            )
+        }
+        "/print-notitle" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            story(
+                "Print Has Title",
+                "PRINT_NOTITLE_FALLBACK",
+                r#"<a href="/bare-print">Print version</a>"#,
+            )
+        }
+        "/bare-print" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            long_page(
+                "<html><head></head><body><article><p>BARE_PRINT_MARKER must not appear.</p>",
+                "</article></body></html>",
+            )
+        }
+        "/print-notext" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            story(
+                "Print Has Body",
+                "PRINT_NOTEXT_FALLBACK",
+                r#"<a href="/empty-print">Print version</a>"#,
+            )
+        }
+        "/empty-print" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            "<html><head><title>Empty Print</title></head><body><script>document.write('EMPTY_PRINT_MARKER')</script></body></html>"
+                .to_string()
+        }
+        "/glyph-gap" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            story("東京 Headline", "GLYPH_😀_GAP", "")
+        }
+        "/svg-article" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            let host = host_of(&req);
+            format!(
+                r#"<!DOCTYPE html>
+                <html lang="en"><head><title>Svg Story</title></head>
+                <body><article>
+                  <p>SVG_ARTICLE_MARKER. The quick brown fox reads this folio article about rust, epub export, and fish and chips. It keeps going so the extractor has a real paragraph to score.</p>
+                  <p>Second paragraph of the same article, still about the folio export, with more sentences so readability keeps this node.</p>
+                  <img src="http://{host}/cover.svg" alt="diagram">
+                </article></body></html>"#
             )
         }
         "/banner-reader" => {
@@ -778,9 +860,8 @@ fn usage_failures_exit_2_before_fetch() {
     for args in [
         vec!["--max-pages", "0", url.as_str()],
         vec!["--max-pages", "16", url.as_str()],
-        vec!["--format", "pdf", url.as_str()],
+        vec!["--format", "pdf", "-o", "story.epub", url.as_str()],
         vec!["-o", "-", url.as_str()],
-        vec!["-o", "story.pdf", url.as_str()],
         vec!["-format", url.as_str()],
     ] {
         let out = folio(&dir, &args);
@@ -1077,6 +1158,214 @@ fn typed_page_banner_is_tried_before_the_reader_page() {
     let top = (2560.0_f64 * 0.12).round() as u32;
     let pixel = cover_pixel(&epub, 800, top + 20);
     assert!(pixel[0] > 180 && pixel[2] < 80, "{pixel:?}");
+}
+
+fn assert_plex_only(bytes: &[u8]) {
+    let names = common::pdf_font_names(bytes);
+    assert!(!names.is_empty(), "pdf embedded no named font");
+    for name in &names {
+        let lower = name.to_ascii_lowercase();
+        assert!(lower.contains("plex"), "{name} in {names:?}");
+        assert!(!lower.contains("helvetica"), "{names:?}");
+        assert!(!lower.contains("dejavu"), "{names:?}");
+    }
+}
+
+#[test]
+fn pdf_has_title_author_image_and_no_video_text() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/article", server.base);
+    let out = folio(&dir, &["--format", "pdf", "-o", "story.pdf", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert_eq!(out.stdout, "story.pdf\n");
+    let bytes = std::fs::read(dir.join("story.pdf")).unwrap();
+    let info = common::pdf_info(&bytes);
+    assert_eq!(info.document_title, "Article Headline");
+    assert_eq!(info.author, "Ada Lovelace");
+    assert_eq!(info.subject, "From json-ld");
+    assert_eq!(info.creation_date.date.year, 2024);
+    assert_eq!(info.creation_date.date.month, 5);
+    assert_eq!(info.creation_date.date.day, 6);
+    assert_eq!(info.creation_date.time.hour, 0);
+    assert_eq!(info.creation_date.offset.hours, 0);
+    let text = common::pdf_text(&bytes);
+    assert!(text.contains("FOLIO_ARTICLE_TEXT"), "{text}");
+    assert!(!text.contains("SECRET_VIDEO_PAYLOAD"), "{text}");
+    assert!(common::pdf_has_image(&bytes), "pdf has no image object");
+    assert_plex_only(&bytes);
+}
+
+#[test]
+fn pdf_embeds_only_plex_when_the_article_has_cjk_and_emoji() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/glyph-gap", server.base);
+    let out = folio(&dir, &["--format", "pdf", "-o", "glyph.pdf", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert_eq!(out.stderr.matches("no glyph").count(), 1, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("warning: pdf: IBM Plex Serif has no glyph"),
+        "{}",
+        out.stderr
+    );
+    let bytes = std::fs::read(dir.join("glyph.pdf")).unwrap();
+    assert_plex_only(&bytes);
+    assert_eq!(common::pdf_info(&bytes).document_title, "東京 Headline");
+}
+
+#[test]
+fn print_page_without_a_title_falls_back_to_the_article() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/print-notitle", server.base);
+    let out = folio(&dir, &["--format", "pdf", "-o", "notitle.pdf", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert!(
+        out.stderr.contains(&format!(
+            "warning: print view failed ({}/bare-print, missing title)",
+            server.base
+        )),
+        "{}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains("missing title at"), "{}", out.stderr);
+    assert!(!out.stderr.contains(&url), "{}", out.stderr);
+    assert!(!out.stderr.contains("error:"), "{}", out.stderr);
+    let bytes = std::fs::read(dir.join("notitle.pdf")).unwrap();
+    let text = common::pdf_text(&bytes);
+    assert!(text.contains("PRINT_NOTITLE_FALLBACK"), "{text}");
+    assert!(!text.contains("BARE_PRINT_MARKER"), "{text}");
+    assert_eq!(common::pdf_info(&bytes).document_title, "Print Has Title");
+}
+
+#[test]
+fn print_page_without_article_text_falls_back_to_the_article() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/print-notext", server.base);
+    let out = folio(&dir, &["--format", "pdf", "-o", "notext.pdf", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert!(
+        out.stderr.contains(&format!(
+            "warning: print view failed ({}/empty-print, no article text)",
+            server.base
+        )),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains(&format!("no article text at {url}")),
+        "{}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains(&url), "{}", out.stderr);
+    assert!(!out.stderr.contains("error:"), "{}", out.stderr);
+    let bytes = std::fs::read(dir.join("notext.pdf")).unwrap();
+    let text = common::pdf_text(&bytes);
+    assert!(text.contains("PRINT_NOTEXT_FALLBACK"), "{text}");
+    assert!(!text.contains("EMPTY_PRINT_MARKER"), "{text}");
+    assert_eq!(common::pdf_info(&bytes).document_title, "Print Has Body");
+}
+
+#[test]
+fn print_view_feeds_the_pdf_and_the_reader_feeds_the_epub() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/print-article", server.base);
+    let pdf_out = folio(&dir, &["-v", "--format", "pdf", "-o", "view.pdf", &url]);
+    assert_eq!(pdf_out.status, 0, "stderr={}", pdf_out.stderr);
+    assert!(
+        pdf_out
+            .stderr
+            .contains(&format!("print view: {}/print-view", server.base)),
+        "{}",
+        pdf_out.stderr
+    );
+    let text = common::pdf_text(&std::fs::read(dir.join("view.pdf")).unwrap());
+    assert!(text.contains("PRINT_ONLY_MARKER"), "{text}");
+    assert!(!text.contains("ARTICLE_ONLY_MARKER"), "{text}");
+    assert!(!text.contains("READER_ONLY_MARKER"), "{text}");
+
+    let epub_out = folio(&dir, &["-v", "-o", "view.epub", &url]);
+    assert_eq!(epub_out.status, 0, "stderr={}", epub_out.stderr);
+    let epub = resource_text(&open_epub(&dir.join("view.epub")));
+    assert!(epub.contains("READER_ONLY_MARKER"), "{epub}");
+    assert!(!epub.contains("PRINT_ONLY_MARKER"), "{epub}");
+    assert!(!epub.contains("ARTICLE_ONLY_MARKER"), "{epub}");
+}
+
+#[test]
+fn a_missing_print_view_falls_back_and_svg_is_skipped() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/print-miss", server.base);
+    let out = folio(&dir, &["--format", "pdf", "-o", "miss.pdf", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert!(
+        out.stderr.contains("warning: print view failed"),
+        "{}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("404"), "{}", out.stderr);
+    let text = common::pdf_text(&std::fs::read(dir.join("miss.pdf")).unwrap());
+    assert!(text.contains("PRINT_FALLBACK_MARKER"), "{text}");
+
+    let svg_url = format!("{}/svg-article", server.base);
+    let svg = folio(&dir, &["--format", "pdf", "-o", "svg.pdf", &svg_url]);
+    assert_eq!(svg.status, 0, "stderr={}", svg.stderr);
+    assert!(
+        svg.stderr.contains("warning: omitted svg image"),
+        "{}",
+        svg.stderr
+    );
+    let text = common::pdf_text(&std::fs::read(dir.join("svg.pdf")).unwrap());
+    assert!(text.contains("SVG_ARTICLE_MARKER"), "{text}");
+}
+
+#[test]
+fn pdf_does_not_fetch_cover_candidates_and_epub_still_does() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/dead-covers", server.base);
+    let before = server.miss_hits.load(Ordering::SeqCst);
+    let pdf = folio(&dir, &["--format", "pdf", "-o", "dead.pdf", &url]);
+    assert_eq!(pdf.status, 0, "stderr={}", pdf.stderr);
+    assert_eq!(server.miss_hits.load(Ordering::SeqCst), before);
+    assert!(
+        !pdf.stderr.contains("omitted image") && !pdf.stderr.contains("missing-"),
+        "{}",
+        pdf.stderr
+    );
+    let text = common::pdf_text(&std::fs::read(dir.join("dead.pdf")).unwrap());
+    assert!(text.contains("DEAD_COVER_MARKER"), "{text}");
+
+    let epub = folio(&dir, &["-o", "dead.epub", &url]);
+    assert_eq!(epub.status, 0, "stderr={}", epub.stderr);
+    assert!(
+        epub.stderr.contains(&format!(
+            "warning: omitted image {}/missing-a.png",
+            server.base
+        )),
+        "{}",
+        epub.stderr
+    );
+    assert!(server.miss_hits.load(Ordering::SeqCst) > before);
+    assert_cover_page(&open_epub(&dir.join("dead.epub")), 1600, 2560);
+}
+
+#[test]
+fn a_pdf_flag_and_an_epub_path_write_nothing() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/article", server.base);
+    let before = server.html_hits.load(Ordering::SeqCst);
+    let out = folio(&dir, &["--format", "pdf", "-o", "story.epub", &url]);
+    assert_eq!(out.status, 2, "stderr={}", out.stderr);
+    assert!(out.stderr.contains("does not match"), "{}", out.stderr);
+    assert!(!dir.join("story.epub").exists());
+    assert_eq!(server.html_hits.load(Ordering::SeqCst), before);
 }
 
 #[test]

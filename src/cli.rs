@@ -7,13 +7,23 @@ use crate::error::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     Epub,
+    Pdf,
+}
+
+impl Format {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Format::Epub => "epub",
+            Format::Pdf => "pdf",
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
 #[command(
     name = "folio",
     version,
-    about = "Write an EPUB of one web article",
+    about = "Write an EPUB or a PDF of one web article",
     arg_required_else_help = true
 )]
 struct Cli {
@@ -21,7 +31,7 @@ struct Cli {
     #[arg(value_name = "URL")]
     url: String,
 
-    /// Output format. Long-only so -f stays force. Only epub in this version.
+    /// Output format. Long-only so -f stays force. `pdf` or `epub`.
     #[arg(long, value_enum)]
     format: Option<Format>,
 

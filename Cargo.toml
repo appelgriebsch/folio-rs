@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-description = "Fetch one web article and write an EPUB"
+description = "Fetch one web article and write an EPUB or a PDF"
 publish = false
 
 [[bin]]
@@ -28,6 +28,11 @@ unicode-linebreak = "0.1"
 unicode-normalization = "0.1"
 url = "2"
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+printpdf = { version = "0.12.8", default-features = false, features = ["html", "jpeg", "png", "gif"] }
+
+[dev-dependencies]
+printpdf = { version = "0.12.8", default-features = false, features = ["html", "jpeg", "png", "gif"] }
+xmlparser = "0.13"
 
 # Raster, resize, and JPEG dominate cover tests. Optimise those crates in dev.
 [profile.dev.package.image]
@@ -37,4 +42,23 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.ab_glyph_rasterizer]
+opt-level = 3
+
+# HTML layout is the slow part of a debug PDF render.
+[profile.dev.package.azul-layout]
+opt-level = 3
+
+[profile.dev.package.azul-core]
+opt-level = 3
+
+[profile.dev.package.azul-css]
+opt-level = 3
+
+[profile.dev.package.allsorts-azul]
+opt-level = 3
+
+[profile.dev.package.printpdf]
+opt-level = 3
+
+[profile.dev.package.rust-fontconfig]
 opt-level = 3
