@@ -293,6 +293,34 @@ fn handle(
                 r#"<a href="/missing-print">Druckansicht</a>"#,
             )
         }
+        "/print-notitle" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            story(
+                "Print Has Title",
+                "PRINT_NOTITLE_FALLBACK",
+                r#"<a href="/bare-print">Print version</a>"#,
+            )
+        }
+        "/bare-print" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            long_page(
+                "<html><head></head><body><article><p>BARE_PRINT_MARKER must not appear.</p>",
+                "</article></body></html>",
+            )
+        }
+        "/print-notext" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            story(
+                "Print Has Body",
+                "PRINT_NOTEXT_FALLBACK",
+                r#"<a href="/empty-print">Print version</a>"#,
+            )
+        }
+        "/empty-print" => {
+            html_hits.fetch_add(1, Ordering::SeqCst);
+            "<html><head><title>Empty Print</title></head><body><script>document.write('EMPTY_PRINT_MARKER')</script></body></html>"
+                .to_string()
+        }
         "/glyph-gap" => {
             html_hits.fetch_add(1, Ordering::SeqCst);
             story("東京 Headline", "GLYPH_😀_GAP", "")
@@ -1185,6 +1213,60 @@ fn pdf_embeds_only_plex_when_the_article_has_cjk_and_emoji() {
     let bytes = std::fs::read(dir.join("glyph.pdf")).unwrap();
     assert_plex_only(&bytes);
     assert_eq!(pdf::pdf_info(&bytes).document_title, "東京 Headline");
+}
+
+#[test]
+fn print_page_without_a_title_falls_back_to_the_article() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/print-notitle", server.base);
+    let out = folio(&dir, &["--format", "pdf", "-o", "notitle.pdf", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert!(
+        out.stderr.contains(&format!(
+            "warning: print view failed ({}/bare-print, missing title)",
+            server.base
+        )),
+        "{}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains("missing title at"), "{}", out.stderr);
+    assert!(!out.stderr.contains(&url), "{}", out.stderr);
+    assert!(!out.stderr.contains("error:"), "{}", out.stderr);
+    let bytes = std::fs::read(dir.join("notitle.pdf")).unwrap();
+    let text = pdf::pdf_text(&bytes);
+    assert!(text.contains("PRINT_NOTITLE_FALLBACK"), "{text}");
+    assert!(!text.contains("BARE_PRINT_MARKER"), "{text}");
+    assert_eq!(pdf::pdf_info(&bytes).document_title, "Print Has Title");
+}
+
+#[test]
+fn print_page_without_article_text_falls_back_to_the_article() {
+    let server = Server::start();
+    let dir = workdir();
+    let url = format!("{}/print-notext", server.base);
+    let out = folio(&dir, &["--format", "pdf", "-o", "notext.pdf", &url]);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert!(
+        out.stderr.contains(&format!(
+            "warning: print view failed ({}/empty-print, no article text)",
+            server.base
+        )),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains(&format!("no article text at {url}")),
+        "{}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains(&url), "{}", out.stderr);
+    assert!(!out.stderr.contains("error:"), "{}", out.stderr);
+    let bytes = std::fs::read(dir.join("notext.pdf")).unwrap();
+    let text = pdf::pdf_text(&bytes);
+    assert!(text.contains("PRINT_NOTEXT_FALLBACK"), "{text}");
+    assert!(!text.contains("EMPTY_PRINT_MARKER"), "{text}");
+    assert_eq!(pdf::pdf_info(&bytes).document_title, "Print Has Body");
 }
 
 #[test]

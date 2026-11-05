@@ -120,20 +120,20 @@ fn choose_source(
         match fetch::fetch_html(http, &print_url, verbose) {
             Ok(print_page) => match compose(http, &print_page, typed, &site_banners, format) {
                 Ok(composed) => return Ok(composed),
-                Err(err) if reader::failure_status(&err).is_some() => {
-                    warn_print(&print_url, &err);
-                }
-                Err(err) => return Err(err),
+                Err(err) => warn_print(&print_url, &err),
             },
-            Err(err) if reader::failure_status(&err).is_some() => warn_print(&print_url, &err),
-            Err(err) => return Err(err),
+            Err(err) => warn_print(&print_url, &err),
         }
     }
     choose_article(http, page, typed, &scan, &site_banners, verbose, format)
 }
 
 fn warn_print(print_url: &url::Url, err: &Error) {
-    let status = reader::failure_status(err).unwrap_or_else(|| "failed".to_string());
+    // The error's Display names the typed URL. The warning must name the print URL.
+    let status = reader::failure_status(err).unwrap_or_else(|| match err {
+        Error::MissingTitle(_) => "missing title".to_string(),
+        _ => "failed".to_string(),
+    });
     eprintln!("warning: print view failed ({print_url}, {status}); used the article page");
 }
 
