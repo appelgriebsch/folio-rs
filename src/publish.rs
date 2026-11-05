@@ -13,12 +13,13 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::article::{extract_article, fragment_has_text};
-use crate::cli::Options;
+use crate::cli::{Format, Options};
 use crate::error::Error;
 use crate::fetch::{self, Page, client};
 use crate::images::{self, ImageWarnings};
 use crate::meta::{self, read_meta_doc};
 use crate::output::{self, TempFile};
+use crate::pdf::{self, PdfMeta};
 use crate::reader::{self, ReaderScan};
 use crate::sanitize;
 use crate::toc::{self, Section};
@@ -28,6 +29,8 @@ struct Composed {
     title: String,
     meta: meta::PageMeta,
     xhtml: String,
+    /// Sanitized HTML with image hrefs, before the EPUB XHTML wrapper.
+    anchored: String,
     images: Vec<images::EmbeddedImage>,
     outline: Vec<Section>,
     cover: Cover,
@@ -45,44 +48,104 @@ pub fn publish(opts: Options) -> Result<std::path::PathBuf, Error> {
     let _single_page = pages_fetched(opts.max_pages);
     let typed = crate::cli::require_http_url(&opts.url)?;
     let explicit = output::prepare_explicit_output(&opts)?;
+    let format = output::agree_format(opts.format, explicit.as_deref())?;
     let http = client()?;
     let page = fetch::fetch_html(&http, &typed, opts.verbose)?;
-    let composed = choose_source(&http, &page, &typed, opts.verbose)?;
+    let composed = choose_source(&http, &page, &typed, format, opts.verbose)?;
     let output = match explicit {
         Some(path) => path,
         None => output::path_from_title(&composed.title, &opts)?,
     };
     let temp = TempFile::new(&output)?;
-    write_epub(
-        &temp,
-        &composed.title,
-        &composed.meta,
-        &composed.xhtml,
-        &composed.images,
-        &composed.outline,
-        &composed.cover,
-    )?;
+    match format {
+        Format::Epub => write_epub(
+            &temp,
+            &composed.title,
+            &composed.meta,
+            &composed.xhtml,
+            &composed.images,
+            &composed.outline,
+            &composed.cover,
+        )?,
+        Format::Pdf => write_pdf(&temp, &composed)?,
+    }
     temp.persist(&output)?;
     Ok(output)
+}
+
+fn write_pdf(temp: &TempFile, composed: &Composed) -> Result<(), Error> {
+    let (body, images) = pdf::article_xhtml(&composed.anchored, &composed.images);
+    let bytes = pdf::render(
+        &body,
+        &images,
+        &PdfMeta {
+            title: &composed.title,
+            meta: &composed.meta,
+            file_time: std::time::SystemTime::now(),
+        },
+    )?;
+    std::fs::write(temp.path(), bytes).map_err(|err| Error::Write(err.to_string()))
 }
 
 fn choose_source(
     http: &reqwest::blocking::Client,
     page: &Page,
     typed: &url::Url,
+    format: Format,
     verbose: bool,
 ) -> Result<Composed, Error> {
-    let (scan, site_banners) = {
+    let (scan, print, site_banners) = {
         let doc = Document::from(page.html.as_str());
         let meta = read_meta_doc(&doc, &page.response_url, typed);
-        (reader::scan(&doc, &meta.base), meta.banners)
+        (
+            reader::scan(&doc, &meta.base),
+            reader::find_print_link(&doc, &meta.base),
+            meta.banners,
+        )
     };
     if verbose {
         eprintln!("{}", scan.verbose_line());
+        if format == Format::Pdf {
+            eprintln!("{}", reader::print_verbose_line(&print));
+        }
     }
+    // ponytail: issue #3 appends rel=next on the document this function returns
+    if format == Format::Pdf
+        && let reader::PrintScan::One(print_url) = print
+    {
+        match fetch::fetch_html(http, &print_url, verbose) {
+            Ok(print_page) => match compose(http, &print_page, typed, &site_banners) {
+                Ok(composed) => return Ok(composed),
+                Err(err) if reader::failure_status(&err).is_some() => {
+                    warn_print(&print_url, &err);
+                }
+                Err(err) => return Err(err),
+            },
+            Err(err) if reader::failure_status(&err).is_some() => warn_print(&print_url, &err),
+            Err(err) => return Err(err),
+        }
+    }
+    choose_article(http, page, typed, &scan, &site_banners, verbose)
+}
+
+fn warn_print(print_url: &url::Url, err: &Error) {
+    let status = reader::failure_status(err).unwrap_or_else(|| "failed".to_string());
+    eprintln!("warning: print view failed ({print_url}, {status}); used the article page");
+}
+
+/// Issue #3 walks continuation pages on this document. It is not merged, so the
+/// chosen page is the whole article.
+fn choose_article(
+    http: &reqwest::blocking::Client,
+    page: &Page,
+    typed: &url::Url,
+    scan: &ReaderScan,
+    site_banners: &[String],
+    verbose: bool,
+) -> Result<Composed, Error> {
     match scan {
         ReaderScan::One(hit) => match fetch::fetch_html(http, &hit.url, verbose) {
-            Ok(reader_page) => match compose(http, &reader_page, typed, &site_banners) {
+            Ok(reader_page) => match compose(http, &reader_page, typed, site_banners) {
                 Ok(composed) => Ok(composed),
                 Err(err) => fallback(http, page, typed, &hit.url, err),
             },
@@ -164,6 +227,7 @@ fn compose(
         title,
         meta,
         xhtml,
+        anchored,
         images: embedded,
         outline,
         cover,
