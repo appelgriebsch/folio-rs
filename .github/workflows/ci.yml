@@ -15,7 +15,31 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      # worker-build 0.1.x is the last line that accepts worker@0.6; it pins a
+      # bundled wasm-bindgen 0.2.105, so override with the wasm-bindgen matching worker/Cargo.lock.
+      - run: cargo install worker-build --locked --version 0.1.14
+      - run: cargo install wasm-bindgen-cli --locked --version 0.2.130
+      - run: echo "WASM_BINDGEN_BIN=$HOME/.cargo/bin/wasm-bindgen" >> "$GITHUB_ENV"
+      - run: worker-build --release
+        working-directory: worker
+      - run: cargo test --locked
+        working-directory: worker
