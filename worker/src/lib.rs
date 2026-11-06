@@ -17,7 +17,8 @@ use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use worker::{
-    event, Context, Env, Headers, Method, Request, Response, Result, RouteContext, Router,
+    event, Context, Env, Headers, Method, RateLimiter, Request, Response, Result, RouteContext,
+    Router,
 };
 
 #[wasm_bindgen]
@@ -39,18 +40,6 @@ extern "C" {
 
 impl worker::EnvBinding for Browser {
     const TYPE_NAME: &'static str = "Browser";
-}
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(extends = js_sys::Object, js_name = "RateLimit")]
-    type RateLimit;
-    #[wasm_bindgen(method, js_name = limit)]
-    fn limit(this: &RateLimit, options: &JsValue) -> js_sys::Promise;
-}
-
-impl worker::EnvBinding for RateLimit {
-    const TYPE_NAME: &'static str = "RateLimit";
 }
 
 #[derive(Deserialize)]
@@ -99,11 +88,12 @@ async fn handle_epub(mut req: Request, ctx: RouteContext<()>) -> Result<Response
         _ => return json_error(400, "missing sourceUrl"),
     };
     if let Some(word) = format.as_deref() {
-        if Format::parse(word).is_none() {
-            return json_error(400, "format must be epub or pdf");
-        }
-        if word.eq_ignore_ascii_case("pdf") {
-            return json_error(400, "pdf requires POST /pdf with a bearer token");
+        match Format::parse(word) {
+            Some(Format::Pdf) => {
+                return json_error(400, "pdf requires POST /pdf with a bearer token")
+            }
+            Some(Format::Epub) => {}
+            None => return json_error(400, "format must be epub or pdf"),
         }
     }
     if let Err(err) = service::require_public_http_url(&source_url) {
@@ -127,12 +117,14 @@ async fn handle_epub(mut req: Request, ctx: RouteContext<()>) -> Result<Response
 
 async fn handle_pdf(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let secret = match ctx.env.secret(TOKEN_SECRET) {
-        Ok(secret) => secret.to_string(),
-        Err(_) => return json_error(500, "FOLIO_API_TOKEN secret is not configured"),
+        Ok(secret) if !secret.to_string().is_empty() => secret.to_string(),
+        _ => return json_error(500, "FOLIO_API_TOKEN secret is not configured"),
     };
     let auth = req.headers().get("Authorization").ok().flatten();
     if !bearer_matches(auth.as_deref(), &secret) {
-        return json_error(401, "missing or invalid bearer token");
+        let mut response = json_error(401, "missing or invalid bearer token")?;
+        response.headers_mut().set("WWW-Authenticate", "Bearer")?;
+        return Ok(response);
     }
     if let Some(response) = rate_limit_response(&req, &ctx.env).await? {
         return Ok(response);
@@ -160,8 +152,9 @@ async fn handle_pdf(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         _ => return json_error(400, "missing sourceUrl"),
     };
     if let Some(word) = format.as_deref() {
-        if !word.eq_ignore_ascii_case("pdf") {
-            return json_error(400, "the /pdf route only renders pdf");
+        match Format::parse(word) {
+            Some(Format::Pdf) => {}
+            _ => return json_error(400, "the /pdf route only renders pdf"),
         }
     }
     if let Err(err) = service::require_public_http_url(&source_url) {
@@ -177,13 +170,31 @@ async fn handle_pdf(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
 
 /// RFC 7235 bearer scheme (case-insensitive) with the shared token.
 fn bearer_matches(auth: Option<&str>, secret: &str) -> bool {
+    if secret.is_empty() {
+        return false;
+    }
     let Some(header) = auth else {
         return false;
     };
     let Some((scheme, token)) = header.split_once(' ') else {
         return false;
     };
-    scheme.eq_ignore_ascii_case("bearer") && token.trim() == secret
+    scheme.eq_ignore_ascii_case("bearer") && constant_time_eq(token.trim(), secret)
+}
+
+/// Byte-wise equality without early exit, so the comparison time does not
+/// depend on where the token first differs.
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
 }
 
 fn rate_limit_key(req: &Request) -> String {
@@ -204,7 +215,7 @@ fn rate_limit_exceeded(success: Option<bool>) -> bool {
 /// The binding itself is a ship gate: without it the generate routes answer
 /// 500 rather than running unthrottled.
 async fn rate_limit_response(req: &Request, env: &Env) -> Result<Option<Response>> {
-    let limit: RateLimit = match env.get_binding(RATE_LIMIT_BINDING) {
+    let limit: RateLimiter = match env.get_binding(RATE_LIMIT_BINDING) {
         Ok(limit) => limit,
         Err(_) => {
             return Ok(Some(json_error(
@@ -213,20 +224,11 @@ async fn rate_limit_response(req: &Request, env: &Env) -> Result<Option<Response
             )?))
         }
     };
-    let options = js_sys::Object::new();
-    js_sys::Reflect::set(
-        &options,
-        &"key".into(),
-        &JsValue::from_str(&rate_limit_key(req)),
-    )
-    .map_err(|err| format_js_error(&err))?;
-    let outcome = JsFuture::from(limit.limit(&options.into()))
-        .await
-        .map_err(|err| format_js_error(&err))?;
-    let success = js_sys::Reflect::get(&outcome, &"success".into())
-        .ok()
-        .and_then(|value| value.as_bool());
-    if rate_limit_exceeded(success) {
+    let outcome = match limit.limit(rate_limit_key(req)).await {
+        Ok(outcome) => outcome,
+        Err(_) => return Ok(Some(json_error(500, "rate limit check failed")?)),
+    };
+    if rate_limit_exceeded(Some(outcome.success)) {
         return Ok(Some(json_error(429, "rate limit exceeded")?));
     }
     Ok(None)
@@ -423,12 +425,24 @@ mod tests {
         assert!(!bearer_matches(None, "secret"));
         assert!(!bearer_matches(Some(""), "secret"));
         assert!(!bearer_matches(Some("Bearer"), "secret"));
+        assert!(!bearer_matches(Some("Bearer "), ""));
         assert!(!bearer_matches(Some("Bearer wrong"), "secret"));
         assert!(!bearer_matches(Some("Basic secret"), "secret"));
         assert!(bearer_matches(Some("Bearer secret"), "secret"));
         assert!(bearer_matches(Some("bearer secret"), "secret"));
         assert!(bearer_matches(Some("Bearer  secret  "), "secret"));
         assert!(!bearer_matches(Some("Bearer secret2"), "secret"));
+        assert!(!bearer_matches(Some("Bearer secret"), "secret2"));
+    }
+
+    #[test]
+    fn constant_time_eq_matches_only_equal_strings() {
+        use super::constant_time_eq;
+        assert!(constant_time_eq("secret", "secret"));
+        assert!(!constant_time_eq("secret", "secre"));
+        assert!(!constant_time_eq("secret", "secret2"));
+        assert!(!constant_time_eq("", "secret"));
+        assert!(constant_time_eq("", ""));
     }
 
     #[test]
