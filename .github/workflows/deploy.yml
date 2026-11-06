@@ -2,9 +2,11 @@ name: deploy
 
 # Deploys only on pushes to main — never from pull requests, so no
 # Cloudflare credentials are ever exposed to PR CI (ci.yml has none either).
+# workflow_dispatch allows a manual run (e.g. a prod re-deploy after approval).
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -42,6 +44,10 @@ jobs:
           set -o pipefail
           npx wrangler deploy --env staging 2>&1 | tee /tmp/wrangler-deploy.log
           grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' /tmp/wrangler-deploy.log | head -1 > /tmp/staging_url
+          if ! test -s /tmp/staging_url; then
+            echo "no *.workers.dev URL in wrangler output — configure a custom domain or check the deploy log" >&2
+            exit 1
+          fi
       - name: Smoke staging
         run: |
           URL=$(cat /tmp/staging_url)
