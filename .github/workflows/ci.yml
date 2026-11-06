@@ -34,7 +34,11 @@ jobs:
         with:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
-      - run: cargo install worker-build --locked --version 0.8.7
+      # worker-build 0.1.x is the last line that accepts worker@0.6; it pins a
+      # bundled wasm-bindgen 0.2.105, so override with the wasm-bindgen matching worker/Cargo.lock.
+      - run: cargo install worker-build --locked --version 0.1.14
+      - run: cargo install wasm-bindgen-cli --locked --version 0.2.130
+      - run: echo "WASM_BINDGEN_BIN=$HOME/.cargo/bin/wasm-bindgen" >> "$GITHUB_ENV"
       - run: worker-build --release
         working-directory: worker
       - run: cargo test --locked
