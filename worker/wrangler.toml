@@ -7,3 +7,10 @@ compatibility_flags = ["nodejs_compat"]
 # Requires the Browser Rendering product on the account.
 [browser]
 binding = "BROWSER"
+
+# Ship gate: the generate routes check this binding per client IP and answer
+# 429 when over the limit. The Worker answers 500 if the binding is missing.
+[[ratelimits]]
+name = "GENERATE_LIMIT"
+namespace_id = "1001"
+simple = { limit = 10, period = 60 }
