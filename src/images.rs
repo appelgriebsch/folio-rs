@@ -471,8 +471,15 @@ pub async fn download_cover(
     client: &Client,
     url: &str,
 ) -> Result<Option<image::DynamicImage>, Error> {
+    // On the wasm32 Worker path an http(s) cover URL with a non-public host
+    // is denied with 400; unparseable or non-http URLs stay a soft skip, as
+    // on the native CLI.
     #[cfg(target_arch = "wasm32")]
-    crate::fetch::public_host_policy(url)?;
+    if let Ok(parsed) = Url::parse(url) {
+        if parsed.scheme() == "http" || parsed.scheme() == "https" {
+            crate::fetch::public_host_policy(url)?;
+        }
+    }
     let (mime, bytes) = match load_image_bytes(client, url).await {
         Ok(loaded) => loaded,
         Err(()) => return Ok(None),
@@ -487,16 +494,19 @@ pub async fn download_images(
 ) -> Result<(String, Vec<EmbeddedImage>), Error> {
     let doc = Document::fragment(html);
     let imgs: Vec<NodeRef<'_>> = doc.select("img").nodes().to_vec();
-    // On the wasm32 Worker path every candidate image host must be public;
-    // a denied URL fails the request with 400 instead of being skipped.
+    // On the wasm32 Worker path every http(s) candidate image URL with a
+    // non-public host fails the request with 400. Unparseable, non-http, or
+    // data: URLs are not policy denies and stay a soft skip, as on the CLI.
     #[cfg(target_arch = "wasm32")]
     for img in &imgs {
         let list = attr(img, "data-folio-src")
             .or_else(|| attr(img, "src"))
             .unwrap_or_default();
         for url in list.split_whitespace() {
-            if !url.starts_with("data:") {
-                crate::fetch::public_host_policy(url)?;
+            if let Ok(parsed) = Url::parse(url) {
+                if parsed.scheme() == "http" || parsed.scheme() == "https" {
+                    crate::fetch::public_host_policy(url)?;
+                }
             }
         }
     }

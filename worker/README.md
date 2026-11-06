@@ -70,6 +70,9 @@ Develop locally with `npx wrangler dev`.
   (`folio_rs::service::require_public_http_url`); a denied host answers
   `400`. This is application policy, not a Cloudflare platform block. The
   CLI keeps the looser scheme-only check and can still fetch loopback.
+  Boundary: the check inspects the URL's host literal, not the IP it
+  resolves to at fetch time — a domain that DNS-resolves to a private or
+  metadata address is only stopped by Cloudflare's fetch path.
   ponytail: only the PDF route is authenticated (shared bearer token) and
   the EPUB route is public behind the rate limit. It is an outbound fetcher
   by design; do not expose it broadly without Cloudflare Access, WAF, or
