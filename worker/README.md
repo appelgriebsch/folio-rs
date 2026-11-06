@@ -53,11 +53,38 @@ so the headless browser makes no network requests of its own.
 ```sh
 cd worker
 cargo install worker-build   # or: npm install -g worker-build
-worker-build --release       # writes build/worker/shim.js + the wasm bundle
+worker-build --release       # writes build/index.js + build/index_bg.wasm + build/worker/shim.mjs
 npx wrangler deploy          # uses wrangler.toml
 ```
 
 Develop locally with `npx wrangler dev`.
+
+## Deploy (GitHub Actions)
+
+`.github/workflows/deploy.yml` runs **only on pushes to main** — never from
+PRs — so Cloudflare credentials are never exposed to PR CI (`ci.yml` has no
+tokens either).
+
+- **Staging** (`environment: staging`, no approval): builds the wasm bundle
+  with pinned `worker-build` 0.1.14 + `wasm-bindgen` 0.2.130, deploys
+  `wrangler deploy --env staging` (Worker `folio-staging`), then smokes the
+  deployed URL: `GET /health` = 200 `ok`, `format=pdf` on `/` = 400,
+  `POST /pdf` without a bearer = 401, and an EPUB generate of a fixed public
+  URL (200 `application/epub+zip`, or 422 if the page has no article). No
+  live PDF/Browser Rendering smoke by default.
+- **Production** (`environment: production`, required reviewer approval):
+  same build, `wrangler deploy --env production` (Worker `folio`).
+
+Secrets are environment-scoped and **not shared across envs**: set
+`STAGING_CLOUDFLARE_API_TOKEN` + `STAGING_CLOUDFLARE_ACCOUNT_ID` on the
+`staging` GitHub environment and `PRODUCTION_CLOUDFLARE_API_TOKEN` +
+`PRODUCTION_CLOUDFLARE_ACCOUNT_ID` on `production`. `wrangler` itself is
+pinned via `WRANGLER_VERSION` in the workflow, and the GitHub Actions are
+SHA-pinned like in `ci.yml`. `FOLIO_API_TOKEN` is a per-env Worker secret
+(`wrangler secret put FOLIO_API_TOKEN --env staging|production`); rotating
+it means updating the Worker secret and the GitHub secret together.
+`wrangler.toml` defines `[env.staging]` / `[env.production]` with the
+`BROWSER` binding and a per-env `GENERATE_LIMIT` rate-limit namespace.
 
 ## Notes
 

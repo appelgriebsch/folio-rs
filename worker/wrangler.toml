@@ -1,5 +1,5 @@
 name = "folio"
-main = "build/worker/shim.js"
+main = "build/worker/shim.mjs"
 compatibility_date = "2026-09-01"
 compatibility_flags = ["nodejs_compat"]
 
@@ -13,4 +13,29 @@ binding = "BROWSER"
 [[ratelimits]]
 name = "GENERATE_LIMIT"
 namespace_id = "1001"
+simple = { limit = 10, period = 60 }
+
+# Deploy targets (deploy.yml): staging deploys on push to main, production
+# via the GitHub `production` environment approval. Each env gets its own
+# Worker name, BROWSER binding, and rate-limit namespace.
+[env.staging]
+name = "folio-staging"
+
+[env.staging.browser]
+binding = "BROWSER"
+
+[[env.staging.ratelimits]]
+name = "GENERATE_LIMIT"
+namespace_id = "1002"
+simple = { limit = 10, period = 60 }
+
+[env.production]
+name = "folio"
+
+[env.production.browser]
+binding = "BROWSER"
+
+[[env.production.ratelimits]]
+name = "GENERATE_LIMIT"
+namespace_id = "1003"
 simple = { limit = 10, period = 60 }
