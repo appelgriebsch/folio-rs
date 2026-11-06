@@ -238,6 +238,19 @@ mod tests {
     }
 
     #[test]
+    fn require_http_url_stays_loose_for_the_cli() {
+        // The private CLI may fetch loopback/local test servers; only the
+        // public Worker path applies `require_public_http_url`.
+        for raw in ["http://127.0.0.1:8080/x", "http://localhost/x"] {
+            assert!(
+                super::require_http_url(raw).is_ok(),
+                "{raw} must stay allowed"
+            );
+        }
+        assert!(super::require_http_url("ftp://example.com/x").is_err());
+    }
+
+    #[test]
     fn file_name_slugs_the_title() {
         assert_eq!(
             file_name("Caf\u{e9} Story!", Format::Epub).unwrap(),

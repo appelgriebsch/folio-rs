@@ -3,6 +3,8 @@ use image::ImageFormat;
 use reqwest::Client;
 use url::Url;
 
+use crate::error::Error;
+
 pub const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 const SHORT_DATA_BASE64: usize = 140;
 
@@ -463,18 +465,41 @@ fn inside_picture(node: &NodeRef<'_>) -> bool {
 /// Fetch one http(s) or data image and decode it for the cover.
 /// Unusable: fetch error, SVG, AVIF, undecodable bytes, or width under 400 px.
 /// GIF contributes its first frame. WebP is decoded.
-pub async fn download_cover(client: &Client, url: &str) -> Option<image::DynamicImage> {
-    let (mime, bytes) = load_image_bytes(client, url).await.ok()?;
-    decode_cover(&bytes, mime.as_deref())
+/// On the wasm32 Worker path a non-public image host is denied with
+/// `Error::Usage` (answered as 400), not skipped.
+pub async fn download_cover(
+    client: &Client,
+    url: &str,
+) -> Result<Option<image::DynamicImage>, Error> {
+    #[cfg(target_arch = "wasm32")]
+    crate::fetch::public_host_policy(url)?;
+    let (mime, bytes) = match load_image_bytes(client, url).await {
+        Ok(loaded) => loaded,
+        Err(()) => return Ok(None),
+    };
+    Ok(decode_cover(&bytes, mime.as_deref()))
 }
 
 pub async fn download_images(
     html: &str,
     client: &Client,
     warnings: &mut ImageWarnings,
-) -> (String, Vec<EmbeddedImage>) {
+) -> Result<(String, Vec<EmbeddedImage>), Error> {
     let doc = Document::fragment(html);
     let imgs: Vec<NodeRef<'_>> = doc.select("img").nodes().to_vec();
+    // On the wasm32 Worker path every candidate image host must be public;
+    // a denied URL fails the request with 400 instead of being skipped.
+    #[cfg(target_arch = "wasm32")]
+    for img in &imgs {
+        let list = attr(img, "data-folio-src")
+            .or_else(|| attr(img, "src"))
+            .unwrap_or_default();
+        for url in list.split_whitespace() {
+            if !url.starts_with("data:") {
+                crate::fetch::public_host_policy(url)?;
+            }
+        }
+    }
     let mut embedded = Vec::new();
     let mut cache: Vec<(String, Option<String>)> = Vec::new();
     for img in imgs {
@@ -492,7 +517,7 @@ pub async fn download_images(
             None => img.remove_from_parent(),
         }
     }
-    (doc.tree.root().inner_html().to_string(), embedded)
+    Ok((doc.tree.root().inner_html().to_string(), embedded))
 }
 
 async fn first_embedded(
@@ -541,7 +566,17 @@ async fn load_image_bytes(client: &Client, url: &str) -> Result<(Option<String>,
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(());
     }
+    // On the wasm32 Worker path never fetch a non-public image host, and never
+    // accept a body whose redirect end target is non-public.
+    #[cfg(target_arch = "wasm32")]
+    if crate::fetch::public_host_policy(url).is_err() {
+        return Err(());
+    }
     let response = client.get(parsed).send().await.map_err(|_| ())?;
+    #[cfg(target_arch = "wasm32")]
+    if crate::fetch::public_host_policy(response.url().as_str()).is_err() {
+        return Err(());
+    }
     if !response.status().is_success() {
         return Err(());
     }

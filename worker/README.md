@@ -65,11 +65,15 @@ Develop locally with `npx wrangler dev`.
   images; set the `User-Agent` expectation of the target sites accordingly.
   `sourceUrl` is validated with `folio_rs::service::require_public_http_url`,
   which rejects loopback, link-local, private, and other non-public hosts.
-- ponytail: only the PDF route is authenticated (shared bearer token), the
-  EPUB route is public behind the rate limit, and redirect or image targets
-  are only constrained by Cloudflare's fetch path. It is an outbound
-  fetcher by design; do not expose it broadly without Cloudflare Access,
-  WAF, or similar in front.
+- Host policy: `sourceUrl` and, on the Worker path, every redirect end
+  target plus every image/cover URL must be public hosts
+  (`folio_rs::service::require_public_http_url`); a denied host answers
+  `400`. This is application policy, not a Cloudflare platform block. The
+  CLI keeps the looser scheme-only check and can still fetch loopback.
+  ponytail: only the PDF route is authenticated (shared bearer token) and
+  the EPUB route is public behind the rate limit. It is an outbound fetcher
+  by design; do not expose it broadly without Cloudflare Access, WAF, or
+  similar in front.
 - Browser Rendering requires the Browser Rendering product on the account;
   without the binding, `format=pdf` answers `501`. Browser calls are raced
   against a 30 s timeout and the rendered PDF is capped at 32 MiB.

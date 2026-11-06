@@ -18,6 +18,16 @@ pub struct Page {
     pub html: String,
 }
 
+/// The public-host policy enforced on the wasm32 Worker path for every
+/// outbound fetch — the initial URL and the redirect end target alike.
+/// Denied hosts answer `Error::Usage`, which the Worker maps to 400. Kept
+/// target-agnostic so host tests can exercise it; the native CLI only
+/// applies the scheme check below.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn public_host_policy(raw: &str) -> Result<(), Error> {
+    crate::service::require_public_http_url(raw).map(|_| ())
+}
+
 pub fn client() -> Result<Client, Error> {
     // Timeouts and the redirect policy hook exist on native clients only;
     // the wasm32 client runs inside the Fetch API, which applies its own
@@ -46,6 +56,8 @@ pub fn client() -> Result<Client, Error> {
 }
 
 pub async fn fetch_html(http: &Client, typed_url: &Url, verbose: bool) -> Result<Page, Error> {
+    #[cfg(target_arch = "wasm32")]
+    public_host_policy(typed_url.as_str())?;
     if verbose || stderr_is_terminal() {
         crate::log_line(&format!("fetch {typed_url}"));
     }
@@ -61,6 +73,10 @@ pub async fn fetch_html(http: &Client, typed_url: &Url, verbose: bool) -> Result
             reason: "response url is not http or https".to_string(),
         });
     }
+    // On wasm32 the Fetch API follows redirects internally, so the end target
+    // is the only redirect target the application can policy-check.
+    #[cfg(target_arch = "wasm32")]
+    public_host_policy(response_url.as_str())?;
     if !response.status().is_success() {
         return Err(Error::Fetch {
             url: response_url.to_string(),
@@ -147,12 +163,32 @@ pub(crate) fn stderr_is_terminal() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::exceeds_cap;
+    use super::{exceeds_cap, public_host_policy};
 
     #[test]
     fn cap_counts_the_incoming_chunk() {
         assert!(!exceeds_cap(0, 100, 100));
         assert!(exceeds_cap(1, 100, 100));
         assert!(exceeds_cap(0, 101, 100));
+    }
+
+    #[test]
+    fn public_host_policy_denies_private_loopback_and_metadata_targets() {
+        for raw in [
+            "http://127.0.0.1/x",
+            "http://[::1]/x",
+            "http://localhost/x",
+            "http://169.254.169.254/latest/meta-data",
+            "http://10.0.0.5/x",
+            "http://192.168.1.1/x",
+            "http://172.16.0.1/x",
+            "http://100.64.0.1/x",
+            "http://[fe80::1]/x",
+            "http://[::ffff:10.0.0.5]/x",
+        ] {
+            assert!(public_host_policy(raw).is_err(), "{raw} must be denied");
+        }
+        assert!(public_host_policy("https://example.com/article").is_ok());
+        assert!(public_host_policy("http://8.8.8.8/x").is_ok());
     }
 }

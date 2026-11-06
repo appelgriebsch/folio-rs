@@ -222,11 +222,12 @@ pub(crate) async fn compose(
         let mut image = None;
         for url in cover_urls(site_banners, &meta.banners) {
             match images::download_cover(http, &url).await {
-                Some(decoded) => {
+                Ok(Some(decoded)) => {
                     image = Some(decoded);
                     break;
                 }
-                None => warnings.push(&url),
+                Ok(None) => warnings.push(&url),
+                Err(err) => return Err(err),
             }
         }
         let host = typed.host_str().unwrap_or("");
@@ -234,7 +235,7 @@ pub(crate) async fn compose(
     } else {
         None
     };
-    let (with_images, embedded) = images::download_images(&cleaned, http, &mut warnings).await;
+    let (with_images, embedded) = images::download_images(&cleaned, http, &mut warnings).await?;
     warnings.emit();
     let (anchored, outline) = toc::anchor_outline(&with_images);
     let xhtml = xhtml::to_xhtml(&anchored, &meta.language, &title);
