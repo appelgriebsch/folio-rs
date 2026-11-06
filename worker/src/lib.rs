@@ -1,9 +1,12 @@
 //! folio as a Cloudflare Worker.
 //!
-//! `GET /?sourceUrl=<article url>&format=epub|pdf` and the same fields as a
-//! JSON `POST /` body return the generated file for download. EPUB is built
-//! in-process; PDF is rendered from the composed article by the account's
-//! Browser Rendering binding (`BROWSER`).
+//! `GET /?sourceUrl=<article url>` and the same field as a JSON `POST /` body
+//! return the generated EPUB for download; both are public but rate limited
+//! by the `GENERATE_LIMIT` binding. `GET /pdf?sourceUrl=<article url>` and
+//! `POST /pdf` with a JSON body render a PDF through the account's Browser
+//! Rendering binding (`BROWSER`) and require `Authorization: Bearer
+//! <FOLIO_API_TOKEN>`; unauthenticated requests get 401 before any fetching
+//! or rendering. `GET /health` stays open.
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -38,6 +41,18 @@ impl worker::EnvBinding for Browser {
     const TYPE_NAME: &'static str = "Browser";
 }
 
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(extends = js_sys::Object, js_name = "RateLimit")]
+    type RateLimit;
+    #[wasm_bindgen(method, js_name = limit)]
+    fn limit(this: &RateLimit, options: &JsValue) -> js_sys::Promise;
+}
+
+impl worker::EnvBinding for RateLimit {
+    const TYPE_NAME: &'static str = "RateLimit";
+}
+
 #[derive(Deserialize)]
 struct Payload {
     #[serde(rename = "sourceUrl")]
@@ -48,20 +63,27 @@ struct Payload {
 #[event(fetch)]
 pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     Router::new()
-        .get_async("/", handle)
-        .post_async("/", handle)
+        .get_async("/", handle_epub)
+        .post_async("/", handle_epub)
+        .get_async("/pdf", handle_pdf)
+        .post_async("/pdf", handle_pdf)
         .get_async("/health", |_req, _ctx| async { Response::ok("ok") })
         .run(req, env)
         .await
 }
 
-async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
+async fn handle_epub(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    if let Some(response) = rate_limit_response(&req, &ctx.env).await? {
+        return Ok(response);
+    }
     let (source_url, format) = match req.method() {
         Method::Get => {
             let url = req.url()?;
             let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-            let source_url = query.get("sourceUrl").cloned();
-            (source_url, query.get("format").cloned())
+            (
+                query.get("sourceUrl").cloned(),
+                query.get("format").cloned(),
+            )
         }
         Method::Post => {
             let payload: Payload = match req.json().await {
@@ -76,33 +98,138 @@ async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
         Some(url) if !url.trim().is_empty() => url,
         _ => return json_error(400, "missing sourceUrl"),
     };
+    if let Some(word) = format.as_deref() {
+        if Format::parse(word).is_none() {
+            return json_error(400, "format must be epub or pdf");
+        }
+        if word.eq_ignore_ascii_case("pdf") {
+            return json_error(400, "pdf requires POST /pdf with a bearer token");
+        }
+    }
     if let Err(err) = service::require_public_http_url(&source_url) {
         return json_error(400, &err.to_string());
     }
-    let format = match format.as_deref() {
-        Some(word) => match Format::parse(word) {
-            Some(format) => format,
-            None => return json_error(400, "format must be epub or pdf"),
-        },
-        None => Format::Epub,
-    };
     let request = RenderRequest {
         url: source_url,
-        format,
+        format: Format::Epub,
         verbose: false,
     };
-    match format {
-        Format::Epub => match service::render(request).await {
-            Ok(rendered) => file_response(
-                &rendered.bytes,
-                &rendered.file_name,
-                format,
-                &rendered.title,
-            ),
-            Err(err) => json_error(status_for(&err), &err.to_string()),
-        },
-        Format::Pdf => pdf_via_browser(request, &ctx.env).await,
+    match service::render(request).await {
+        Ok(rendered) => file_response(
+            &rendered.bytes,
+            &rendered.file_name,
+            Format::Epub,
+            &rendered.title,
+        ),
+        Err(err) => json_error(status_for(&err), &err.to_string()),
     }
+}
+
+async fn handle_pdf(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let secret = match ctx.env.secret(TOKEN_SECRET) {
+        Ok(secret) => secret.to_string(),
+        Err(_) => return json_error(500, "FOLIO_API_TOKEN secret is not configured"),
+    };
+    let auth = req.headers().get("Authorization").ok().flatten();
+    if !bearer_matches(auth.as_deref(), &secret) {
+        return json_error(401, "missing or invalid bearer token");
+    }
+    if let Some(response) = rate_limit_response(&req, &ctx.env).await? {
+        return Ok(response);
+    }
+    let (source_url, format) = match req.method() {
+        Method::Get => {
+            let url = req.url()?;
+            let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+            (
+                query.get("sourceUrl").cloned(),
+                query.get("format").cloned(),
+            )
+        }
+        Method::Post => {
+            let payload: Payload = match req.json().await {
+                Ok(payload) => payload,
+                Err(_) => return json_error(400, "body must be a JSON object with sourceUrl"),
+            };
+            (payload.source_url, payload.format)
+        }
+        _ => return json_error(405, "use GET with query parameters or POST a JSON body"),
+    };
+    let source_url = match source_url {
+        Some(url) if !url.trim().is_empty() => url,
+        _ => return json_error(400, "missing sourceUrl"),
+    };
+    if let Some(word) = format.as_deref() {
+        if !word.eq_ignore_ascii_case("pdf") {
+            return json_error(400, "the /pdf route only renders pdf");
+        }
+    }
+    if let Err(err) = service::require_public_http_url(&source_url) {
+        return json_error(400, &err.to_string());
+    }
+    let request = RenderRequest {
+        url: source_url,
+        format: Format::Pdf,
+        verbose: false,
+    };
+    pdf_via_browser(request, &ctx.env).await
+}
+
+/// RFC 7235 bearer scheme (case-insensitive) with the shared token.
+fn bearer_matches(auth: Option<&str>, secret: &str) -> bool {
+    let Some(header) = auth else {
+        return false;
+    };
+    let Some((scheme, token)) = header.split_once(' ') else {
+        return false;
+    };
+    scheme.eq_ignore_ascii_case("bearer") && token.trim() == secret
+}
+
+fn rate_limit_key(req: &Request) -> String {
+    req.headers()
+        .get("CF-Connecting-IP")
+        .ok()
+        .flatten()
+        .filter(|ip| !ip.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// A missing `success` field counts as over the limit (fail closed).
+fn rate_limit_exceeded(success: Option<bool>) -> bool {
+    success != Some(true)
+}
+
+/// Returns `Some(429)` when the `GENERATE_LIMIT` binding rejects the request.
+/// The binding itself is a ship gate: without it the generate routes answer
+/// 500 rather than running unthrottled.
+async fn rate_limit_response(req: &Request, env: &Env) -> Result<Option<Response>> {
+    let limit: RateLimit = match env.get_binding(RATE_LIMIT_BINDING) {
+        Ok(limit) => limit,
+        Err(_) => {
+            return Ok(Some(json_error(
+                500,
+                "rate limit binding is not configured; generate routes stay closed",
+            )?))
+        }
+    };
+    let options = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &options,
+        &"key".into(),
+        &JsValue::from_str(&rate_limit_key(req)),
+    )
+    .map_err(|err| format_js_error(&err))?;
+    let outcome = JsFuture::from(limit.limit(&options.into()))
+        .await
+        .map_err(|err| format_js_error(&err))?;
+    let success = js_sys::Reflect::get(&outcome, &"success".into())
+        .ok()
+        .and_then(|value| value.as_bool());
+    if rate_limit_exceeded(success) {
+        return Ok(Some(json_error(429, "rate limit exceeded")?));
+    }
+    Ok(None)
 }
 
 async fn pdf_via_browser(request: RenderRequest, env: &Env) -> Result<Response> {
@@ -245,6 +372,8 @@ fn status_for(err: &Error) -> u16 {
 const BROWSER_RENDER_TIMEOUT_MS: u32 = 30_000;
 const MAX_RENDER_HTML_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PDF_BYTES: usize = 32 * 1024 * 1024;
+const TOKEN_SECRET: &str = "FOLIO_API_TOKEN";
+const RATE_LIMIT_BINDING: &str = "GENERATE_LIMIT";
 
 /// Race a Browser Rendering promise against a timer so a hung page cannot
 /// pin the Worker. When the runtime has no setTimeout, the promise is
@@ -286,8 +415,28 @@ fn format_js_error(err: &JsValue) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{content_disposition, status_for, Payload};
+    use super::{bearer_matches, content_disposition, rate_limit_exceeded, status_for, Payload};
     use folio_rs::error::Error;
+
+    #[test]
+    fn bearer_matches_requires_the_shared_token() {
+        assert!(!bearer_matches(None, "secret"));
+        assert!(!bearer_matches(Some(""), "secret"));
+        assert!(!bearer_matches(Some("Bearer"), "secret"));
+        assert!(!bearer_matches(Some("Bearer wrong"), "secret"));
+        assert!(!bearer_matches(Some("Basic secret"), "secret"));
+        assert!(bearer_matches(Some("Bearer secret"), "secret"));
+        assert!(bearer_matches(Some("bearer secret"), "secret"));
+        assert!(bearer_matches(Some("Bearer  secret  "), "secret"));
+        assert!(!bearer_matches(Some("Bearer secret2"), "secret"));
+    }
+
+    #[test]
+    fn rate_limit_exceeded_fails_closed() {
+        assert!(!rate_limit_exceeded(Some(true)));
+        assert!(rate_limit_exceeded(Some(false)));
+        assert!(rate_limit_exceeded(None));
+    }
 
     #[test]
     fn status_for_maps_errors_to_statuses() {
